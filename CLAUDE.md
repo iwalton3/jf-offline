@@ -44,10 +44,6 @@ HEADFUL=1 ... node tools/smoke.js   # to watch it
   `chunks` (`webpack.common.js:74`), so `index.html` carries a
   `<script defer src="serviceworker.js">`. Upstream that is inert. Anything that
   only exists in a worker must sit behind `IS_SERVICE_WORKER`.
-- **`document.createElement` is patched.** jellyfin-web bundles the webcomponents
-  ES5 shim, which builds elements its own way and never upgrades a custom element
-  made through it. Create custom elements through the parser (`innerHTML`) or the
-  native constructor, or the component mounts and silently never renders.
 - **IndexedDB refuses to clone a Proxy.** See the ground rules above. The
   downloader converts at its own entry points; keep it that way rather than
   adding a conversion per store call.
@@ -66,10 +62,14 @@ HEADFUL=1 ... node tools/smoke.js   # to watch it
 - **vdx refuses to bind a component method that collides with a DOM method.**
   `remove` is the one you will reach for.
 - **`document.createElement` does not upgrade custom elements.** jellyfin-web
-  loads webcomponents.js 0.7 for its own `emby-*` elements and that replaces it.
-  The parser and `importNode` are fine; only `createElement` is not.
-  `tools/sync-vdx.sh` rewrites that call in the copied vdx sources — so **do not
-  edit anything under `overlay/plugin/vdx/` by hand**, re-run the script.
+  loads webcomponents.js 0.7 for its own `emby-*` elements, and that replaces
+  `createElement`; an element made through the replacement runs its
+  connectedCallback against a bare HTMLElement and throws before it renders.
+  Measured in the page: the parser (`innerHTML`), `importNode` and the native
+  `createElement` all upgrade correctly, and only the patched one does not.
+  `tools/sync-vdx.sh` rewrites that call in the copied vdx sources, so **do not
+  edit anything under `overlay/plugin/vdx/` by hand** — re-run the script. Create
+  your own custom elements through the parser.
 - **The router matches on a lower-cased path.** Handlers get lower-cased captures.
   This cost a day once already: image files were written as `Primary` and read as
   `primary`, and every image 404'd with nothing anywhere saying why.
@@ -77,7 +77,7 @@ HEADFUL=1 ... node tools/smoke.js   # to watch it
 ## The schema is shaped for features that do not exist yet
 
 `overlay/ps/schema.js` is the single definition, loaded in both the worker and the
-page. Three decisions there are load-bearing and should not be "simplified":
+page. Four decisions there are load-bearing and should not be "simplified":
 
 - **Source item ids are never reminted.** Rows carry the source `serverId`
   alongside, so syncback and re-download stay lookups.
