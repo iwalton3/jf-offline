@@ -65,6 +65,14 @@ HEADFUL=1 ... node tools/smoke.js   # to watch it
   playlist endpoints, which are exactly the two a download needs.
 - **vdx refuses to bind a component method that collides with a DOM method.**
   `remove` is the one you will reach for.
+- **`document.createElement` does not upgrade custom elements.** jellyfin-web
+  loads webcomponents.js 0.7 for its own `emby-*` elements and that replaces it.
+  The parser and `importNode` are fine; only `createElement` is not.
+  `tools/sync-vdx.sh` rewrites that call in the copied vdx sources — so **do not
+  edit anything under `overlay/plugin/vdx/` by hand**, re-run the script.
+- **The router matches on a lower-cased path.** Handlers get lower-cased captures.
+  This cost a day once already: image files were written as `Primary` and read as
+  `primary`, and every image 404'd with nothing anywhere saying why.
 
 ## The schema is shaped for features that do not exist yet
 

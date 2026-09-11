@@ -247,6 +247,14 @@
         ['GET', new RegExp('^/videos/(' + HEX32 + ')/(?:main|master|live)\\.m3u8$', 'i'), (ctx, id) => PB.hlsPlaylist(ctx, id)],
         ['GET', new RegExp('^/videos/(' + HEX32 + ')/hls1/main/(\\d+)\\.ts$', 'i'),
             (ctx, id, n) => PB.hlsSegment(ctx, id, parseInt(n, 10))],
+        // Jellyfin spells this /Videos/{id}/{mediaSourceId}/Subtitles/{index}/{ticks}/Stream.{fmt};
+        // the media source is always this item's own here, so it is not captured.
+        ['GET', new RegExp('^/videos/(' + HEX32 + ')/' + HEX32 + '/subtitles/(\\d+)/\\d+/stream\\.[a-z]+$', 'i'),
+            (ctx, id, index) => PB.subtitle(ctx, id, parseInt(index, 10))],
+        ['GET', new RegExp('^/videos/(' + HEX32 + ')/subtitles/(\\d+)/stream\\.[a-z]+$', 'i'),
+            (ctx, id, index) => PB.subtitle(ctx, id, parseInt(index, 10))],
+        ['GET', new RegExp('^/videos/(' + HEX32 + ')/trickplay/(\\d+)/(\\d+)\\.jpg$', 'i'),
+            (ctx, id, width, index) => PB.trickplayTile(ctx, id, width, parseInt(index, 10))],
 
         // play state
         ['POST', /^\/sessions\/playing$/, (ctx) => PB.reportProgress(ctx, { started: true })],
@@ -275,6 +283,10 @@
     }
 
     async function dispatch(request, url) {
+        // Matched lower-cased, because jellyfin-web is not consistent about the
+        // case of its paths. Handlers therefore receive LOWER-CASED captures; if a
+        // capture's case matters downstream, normalise it where it is used rather
+        // than assuming the wire spelling survived this line.
         const path = url.pathname.toLowerCase().replace(/\/+$/, '') || '/';
         const ctx = { request, url, params: new Params(url.searchParams) };
 

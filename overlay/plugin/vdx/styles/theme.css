@@ -1,0 +1,169 @@
+/*
+ * VDX-UI shared theme
+ * ---------------------
+ * Variable-only theming (plus a minimal base). Dark mode overrides CSS custom
+ * properties and nothing else - no blanket `body.dark *` rules - so component
+ * styles keep full control of their own colours. This is the palette the
+ * component-library showcase uses; the interactive tutorial and its live
+ * previews share it so everything themes identically.
+ *
+ * Consumed by: componentlib/index.html, tutorial.html, and the tut-live-example
+ * preview iframes. Toggle dark mode by adding the `dark` class to <body>.
+ */
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    background: #f5f5f5;
+}
+
+:root {
+    /* Primary colors */
+    --primary-color: #007bff;
+    --primary-hover: #0056b3;
+
+    /* Text colors */
+    --text-color: #333;
+    --text-secondary: #666;
+    --text-tertiary: #999;
+    --text-muted: #6c757d;
+
+    /* Input styling */
+    --input-bg: #fff;
+    --input-border: #ced4da;
+    --input-text: #333;
+
+    /* Background colors */
+    --hover-bg: #f8f9fa;
+    --selected-bg: #e7f3ff;
+    --table-header-bg: #f8f9fa;
+    --disabled-bg: #e9ecef;
+    --border-color: #eee;
+    --card-bg: white;
+    --code-bg: rgba(175, 184, 193, 0.2);
+
+    /* Shell layout */
+    --shell-bg: #f5f5f5;
+    --sidebar-bg: white;
+    --topbar-bg: #1976d2;
+    --topbar-text: white;
+
+    /* Status colors */
+    --success-color: #28a745;
+    --error-color: #dc3545;
+    --warning-color: #ffc107;
+    --info-color: #17a2b8;
+
+    /* Alert backgrounds */
+    --info-bg: #e7f3ff;
+    --info-text: #0066cc;
+    --success-bg: #d4edda;
+    --success-text: #155724;
+    --success-border: #c3e6cb;
+    --error-bg: #ffe7e7;
+    --error-text: #dc3545;
+    --warning-bg: #fff3cd;
+    --warning-text: #856404;
+
+    /* Code editor / code block token palette (light) */
+    --ce-bg: #ffffff;
+    --ce-text: #24292e;
+    --ce-caret: #24292e;
+    --ce-selection: rgba(0, 120, 215, 0.18);
+    --ce-comment: #6a737d;
+    --ce-keyword: #d73a49;
+    --ce-literal: #005cc5;
+    --ce-number: #005cc5;
+    --ce-string: #032f62;
+    --ce-regex: #032f62;
+    --ce-type: #6f42c1;
+    --ce-fn: #6f42c1;
+    --ce-tpl: #032f62;
+    --ce-interp: #e36209;
+    --ce-tagname: #22863a;
+    --ce-attr: #6f42c1;
+    --ce-attr-dyn: #d73a49;
+    --ce-punct: #24292e;
+    --ce-css-selector: #6f42c1;
+    --ce-css-prop: #005cc5;
+    --ce-css-value: #032f62;
+}
+
+/* Dark theme - overrides variables only */
+body.dark {
+    background: #1a1a1a;
+    color: #ccc;
+
+    --primary-color: #0d6efd;
+    --primary-hover: #0a58ca;
+
+    --text-color: #ccc;
+    --text-secondary: #aaa;
+    --text-tertiary: #777;
+    --text-muted: #888;
+
+    --input-bg: #2d2d2d;
+    --input-border: #444;
+    --input-text: #ccc;
+
+    --hover-bg: #383838;
+    --selected-bg: #1e3a5f;
+    --table-header-bg: #2d2d2d;
+    --disabled-bg: #333;
+    --border-color: #444;
+    --card-bg: #252525;
+    --code-bg: #2a2a2a;
+
+    /* Shell layout - dark theme */
+    --shell-bg: #1a1a1a;
+    --sidebar-bg: #252525;
+    --topbar-bg: #1a365d;
+    --topbar-text: #e0e0e0;
+
+    --success-color: #4ade80;
+    --error-color: #f88;
+    --warning-color: #d4b846;
+    --info-color: #6db3f2;
+
+    --info-bg: #1a3a5c;
+    --info-text: #6db3f2;
+    --error-bg: #4a2020;
+    --error-text: #f88;
+    --warning-bg: #4a3d10;
+    --warning-text: #d4b846;
+
+    /* Success alert colors */
+    --success-bg: #1a3d1a;
+    --success-text: #6dd36d;
+    --success-border: #2d5a2d;
+
+    /* Button colors for input-number and similar */
+    --button-bg: #383838;
+    --button-hover-bg: #444;
+    --button-active-bg: #505050;
+
+    /* Code editor / code block token palette (dark) */
+    --ce-bg: #1e1e1e;
+    --ce-text: #d4d4d4;
+    --ce-caret: #d4d4d4;
+    --ce-selection: rgba(120, 160, 255, 0.25);
+    --ce-comment: #6a9955;
+    --ce-keyword: #569cd6;
+    --ce-literal: #569cd6;
+    --ce-number: #b5cea8;
+    --ce-string: #ce9178;
+    --ce-regex: #d16969;
+    --ce-type: #4ec9b0;
+    --ce-fn: #dcdcaa;
+    --ce-tpl: #ce9178;
+    --ce-interp: #d7ba7d;
+    --ce-tagname: #569cd6;
+    --ce-attr: #9cdcfe;
+    --ce-attr-dyn: #c586c0;
+    --ce-punct: #d4d4d4;
+    --ce-css-selector: #d7ba7d;
+    --ce-css-prop: #9cdcfe;
+    --ce-css-value: #ce9178;
+}

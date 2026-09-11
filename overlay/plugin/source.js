@@ -118,7 +118,7 @@ export class SourceServer {
     items(query) {
         return this.json('/Items', Object.assign({
             userId: this.userId,
-            Fields: 'Overview,Genres,ProviderIds,MediaSources,ParentId,DateCreated,PremiereDate,People,Studios',
+            Fields: 'Overview,Genres,ProviderIds,MediaSources,ParentId,DateCreated,PremiereDate,People,Studios,Trickplay',
             EnableUserData: true,
             Recursive: true,
             SortBy: 'SortName',
@@ -129,7 +129,7 @@ export class SourceServer {
     item(id) {
         return this.json(`/Items/${id}`, {
             userId: this.userId,
-            Fields: 'Overview,Genres,ProviderIds,MediaSources,ParentId,DateCreated,PremiereDate,People,Studios'
+            Fields: 'Overview,Genres,ProviderIds,MediaSources,ParentId,DateCreated,PremiereDate,People,Studios,Trickplay'
         });
     }
 
@@ -140,7 +140,7 @@ export class SourceServer {
     episodes(seriesId) {
         return this.json(`/Shows/${seriesId}/Episodes`, {
             userId: this.userId,
-            Fields: 'Overview,MediaSources,ParentId,DateCreated,PremiereDate'
+            Fields: 'Overview,MediaSources,ParentId,DateCreated,PremiereDate,Trickplay'
         });
     }
 
@@ -162,6 +162,15 @@ export class SourceServer {
             }
         );
         return res.json();
+    }
+
+    /** A text subtitle track, extracted by the server as WebVTT. */
+    subtitleUrl(itemId, mediaSourceId, index) {
+        return `${this.url}/Videos/${itemId}/${mediaSourceId}/Subtitles/${index}/0/Stream.vtt`;
+    }
+
+    trickplayTileUrl(itemId, width, index) {
+        return `${this.url}/Videos/${itemId}/Trickplay/${width}/${index}.jpg`;
     }
 
     imageUrl(itemId, type, tag) {

@@ -68,6 +68,18 @@
     // transcode as playlist plus segments.
     const DOWNLOAD_MODE = { DIRECT: 'direct', HLS: 'hls' };
 
+    /**
+     * What to do about subtitles, decided at sync time because it cannot be
+     * revisited afterwards.
+     *
+     * 'auto' extracts every text track as a sidecar the player can switch between.
+     * Image-based tracks (PGS, VobSub, DVB) have no text to extract, so the only
+     * way to see them offline is to burn one into the picture, which fixes the
+     * choice of track and forces a transcode. That is a decision only the person
+     * downloading can make.
+     */
+    const SUBTITLE_MODE = { AUTO: 'auto', BURN: 'burn', NONE: 'none' };
+
     // Which writer last set played state. v0 has one consumer (nothing), but the
     // distinction has to exist before rows are written: playback progress is a
     // floor that may only advance, while an explicit mark is authoritative both
@@ -85,8 +97,17 @@
             ['media', srv, itemId, sourceId, 'original.' + (container || 'bin')],
         hlsPlaylist: (srv, itemId, sourceId) => ['media', srv, itemId, sourceId, 'hls', 'main.m3u8'],
         hlsSegment: (srv, itemId, sourceId, n) => ['media', srv, itemId, sourceId, 'hls', n + '.ts'],
-        image: (srv, itemId, type) => ['images', srv, itemId, type]
+        // The type is lower-cased here rather than by the callers, because the
+        // router matches on a lower-cased path (see ps/router.js) and therefore
+        // hands handlers a lower-cased capture, while the downloader writes with
+        // Jellyfin's own capitalisation. Two spellings of the same file is a 404
+        // on every image with no error anywhere to say so.
+        subtitle: (srv, itemId, sourceId, index) =>
+            ['media', srv, itemId, sourceId, 'subs', index + '.vtt'],
+        trickplayTile: (srv, itemId, sourceId, width, index) =>
+            ['media', srv, itemId, sourceId, 'trickplay', String(width), index + '.jpg'],
+        image: (srv, itemId, type) => ['images', srv, itemId, String(type).toLowerCase()]
     };
 
-    g.PS_SCHEMA = { ID, VIEWS, DB, DOWNLOAD_STATE, DOWNLOAD_MODE, SET_BY, TICKS_PER_MS, OPFS_ROOT, paths };
+    g.PS_SCHEMA = { ID, VIEWS, DB, DOWNLOAD_STATE, DOWNLOAD_MODE, SUBTITLE_MODE, SET_BY, TICKS_PER_MS, OPFS_ROOT, paths };
 })(self);

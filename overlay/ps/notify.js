@@ -50,6 +50,14 @@
         });
     }
 
+    /** Progress of the offline app-shell precache, for the settings page. */
+    async function precacheProgress(status) {
+        const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+        for (const client of clients) {
+            client.postMessage({ __phantom: true, kind: 'precache-progress', status });
+        }
+    }
+
     async function libraryChanged() {
         await broadcast({
             MessageType: 'LibraryChanged',
@@ -57,5 +65,5 @@
         });
     }
 
-    g.PS_NOTIFY = { broadcast, userDataChanged, libraryChanged };
+    g.PS_NOTIFY = { broadcast, userDataChanged, libraryChanged, precacheProgress };
 })(self);

@@ -26,6 +26,7 @@ script tags in index.html.
 """
 
 import argparse
+import hashlib
 import json
 import mimetypes
 import os
@@ -54,6 +55,42 @@ BOOTSTRAP_TAGS = "".join(
         "/web/ps-bootstrap.js",
     )
 )
+
+
+def build_manifest(webroot):
+    """Every file the app needs offline, with a version that changes when they do.
+
+    A real deployment generates this at build time. It exists because the app is
+    2000-odd lazily-loaded chunks: caching on demand means a route the user has
+    not visited yet simply fails in airplane mode, and there is no way to know
+    which routes those are until they are needed.
+
+    Source maps are excluded; nothing loads them unless devtools is open.
+    """
+    files = []
+    for base, prefix in ((OVERLAY, ""), (webroot, "")):
+        for root, _dirs, names in os.walk(base):
+            for name in names:
+                if name.endswith(".map"):
+                    continue
+                full = os.path.join(root, name)
+                rel = os.path.relpath(full, base).replace(os.sep, "/")
+                files.append((rel, os.path.getsize(full), int(os.path.getmtime(full))))
+
+    # Overlay wins, as it does when serving.
+    seen = {}
+    for rel, size, mtime in files:
+        seen.setdefault(rel, (size, mtime))
+
+    digest = hashlib.sha1()
+    for rel in sorted(seen):
+        size, mtime = seen[rel]
+        digest.update(f"{rel}:{size}:{mtime}\n".encode())
+
+    return {
+        "version": digest.hexdigest()[:12],
+        "files": ["/web/" + rel for rel in sorted(seen)],
+    }
 
 
 def phantom_server_id():
@@ -117,6 +154,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self, body=True):
         path = self.path.split("?", 1)[0]
+
+        if path == "/web/precache-manifest.json":
+            payload = json.dumps(build_manifest(self.server.webroot)).encode()
+            self.send_response(200)
+            self.send_common("application/json; charset=utf-8", len(payload))
+            if body:
+                self.wfile.write(payload)
+            return
 
         # The one API response this process owns. See the module docstring.
         if path.lower() == "/system/info/public":

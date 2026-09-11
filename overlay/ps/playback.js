@@ -63,6 +63,23 @@
             Bitrate: dl.bitrate || 0
         };
 
+        // Only offer subtitle tracks we actually hold. A track the player can
+        // select and then cannot fetch is worse than one that was never offered,
+        // and a burned-in track is in the picture rather than in a list.
+        base.MediaStreams = streams.map((st) => {
+            if (st.Type !== 'Subtitle') return st;
+            const held = (dl.subtitles || []).find((sub) => sub.index === st.Index);
+            if (!held) return null;
+            return Object.assign({}, st, {
+                Codec: 'webvtt',
+                IsExternal: true,
+                IsTextSubtitleStream: true,
+                SupportsExternalStream: true,
+                DeliveryMethod: 'External',
+                DeliveryUrl: `/videos/${dl.itemId}/${dl.sourceId}/Subtitles/${st.Index}/0/Stream.vtt`
+            });
+        }).filter(Boolean);
+
         if (dl.mode === S.DOWNLOAD_MODE.HLS) {
             return Object.assign(base, {
                 Container: 'ts',
@@ -151,6 +168,21 @@
         if (!dl || dl.mode !== S.DOWNLOAD_MODE.HLS) return notFound('no hls copy of ' + itemId);
         const file = await OPFS.file(S.paths.hlsSegment(dl.srv, dl.itemId, dl.sourceId, index));
         return serveFile(file, ctx.request, 'video/mp2t');
+    }
+
+    async function subtitle(ctx, itemId, index) {
+        const dl = await findDownload(itemId);
+        if (!dl) return notFound('no download for ' + itemId);
+        const file = await OPFS.file(S.paths.subtitle(dl.srv, dl.itemId, dl.sourceId, index));
+        if (!file) return notFound('subtitle ' + index);
+        return text(await file.text(), 'text/vtt; charset=utf-8');
+    }
+
+    async function trickplayTile(ctx, itemId, width, index) {
+        const dl = await findDownload(itemId);
+        if (!dl) return notFound('no download for ' + itemId);
+        const file = await OPFS.file(S.paths.trickplayTile(dl.srv, dl.itemId, dl.sourceId, width, index));
+        return serveFile(file, ctx.request, 'image/jpeg');
     }
 
     // --- play state -------------------------------------------------------
@@ -270,7 +302,7 @@
     }
 
     g.PS_PLAYBACK = {
-        playbackInfo, stream, hlsPlaylist, hlsSegment,
+        playbackInfo, stream, hlsPlaylist, hlsSegment, subtitle, trickplayTile,
         reportProgress, setPlayed, setFavorite, toUserDataDto,
         findDownload, findItem
     };

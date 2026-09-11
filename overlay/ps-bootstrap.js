@@ -16,6 +16,16 @@
 (function (g) {
     'use strict';
 
+    /* Captured before jellyfin-web's bundle runs, which is the only moment they
+     * are still the browser's own. jellyfin-web loads the 2015 v0 webcomponents
+     * polyfill for its emby-* elements, and that replaces document.createElement
+     * with one whose elements the native custom-element registry never upgrades.
+     * See overlay/plugin/vdx-native-dom.js for what needs them back. */
+    const nativeDom = {
+        createElement: g.document.createElement,
+        importNode: g.document.importNode
+    };
+
     const NativeWebSocket = g.WebSocket;
     const live = new Set();
 
@@ -117,11 +127,51 @@
         if (target) target.postMessage(Object.assign({ __phantom: true, kind }, payload));
     }
 
+    // Offline app shell. The worker does the work; this keeps poking it, because a
+    // worker part-way through two thousand fetches will be killed and only wakes
+    // again when something sends it an event.
+    const precache = { done: 0, total: 0, version: null, listeners: new Set() };
+
+    const announce = () => {
+        for (const fn of precache.listeners) {
+            try { fn(precache); } catch (err) { console.error('[phantom]', err); }
+        }
+    };
+
+    if (g.navigator.serviceWorker) {
+        g.navigator.serviceWorker.addEventListener('message', (event) => {
+            const data = event.data;
+            if (!data || !data.__phantom) return;
+            if (data.kind !== 'precache-progress' && data.kind !== 'precache-status') return;
+            Object.assign(precache, data.status);
+            announce();
+        });
+    }
+
+    const poke = () => {
+        if (precache.total && precache.done >= precache.total) return;
+        tellWorker('precache');
+    };
+
+    g.addEventListener('load', () => {
+        tellWorker('precache-status');
+        poke();
+        setInterval(poke, 15000);
+    });
+
     g.__phantom = {
+        nativeDom,
         schema: g.PS_SCHEMA,
         db: g.PS_DB,
         opfs: g.PS_OPFS,
         socketsOpen: () => live.size,
-        libraryChanged: () => tellWorker('library-changed')
+        libraryChanged: () => tellWorker('library-changed'),
+        precache,
+        onPrecache: (fn) => {
+            precache.listeners.add(fn);
+            fn(precache);
+            return () => precache.listeners.delete(fn);
+        },
+        refreshPrecache: () => tellWorker('precache-status')
     };
 })(window);

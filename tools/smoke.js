@@ -17,6 +17,9 @@ const PASS = process.env.JF_PASS || 'stdjflib';
 // transcode path. Single-source matters: most of the QA library is multi-version,
 // and those list an mkv first.
 const DIRECT_ITEM = process.env.JF_DIRECT_ITEM || '564f0e0061169c95971a719eb87891f6';
+// Nine extractable subrip tracks, and one with only a picture-based track.
+const SUBTITLE_ITEM = process.env.JF_SUBTITLE_ITEM || '585d3907f46356aceeecff57c7f4f030';
+const BURN_ITEM = process.env.JF_BURN_ITEM || 'b7e1d10a787bf92cbb75f4ffef2a8197';
 const HEADFUL = !!process.env.HEADFUL;
 
 const results = [];
@@ -141,7 +144,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
             : (await server.items({ IncludeItemTypes: 'Movie', Limit: 1, SortBy: 'SortName' })).Items[0];
         if (!item) return { error: 'nothing to download' };
         try {
-            const row = await downloadItem(server, item);
+            const row = await downloadItem(server, item, {});
             return { name: item.Name, id: item.Id, mode: row.mode, state: row.state, bytes: row.bytesDone, segments: row.segments };
         } catch (err) {
             return { error: String(err.message || err), name: item.Name, id: item.Id };
@@ -162,14 +165,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     // the downloader is a Proxy — which IndexedDB refuses to clone. A download
     // driven by a plain fetch never sees it.
     const viaUi = await page.evaluate(async (pid) => {
-        const { reactive } = await import('/web/plugin/vdx-framework.js');
+        const { reactive } = await import('/web/plugin/vdx/lib/framework.js');
         const { knownServers, SourceServer } = await import('/web/plugin/source.js');
         const { downloadItem } = await import('/web/plugin/downloader.js');
         const server = new SourceServer(knownServers(pid)[0]);
         const res = await server.items({ IncludeItemTypes: 'Movie', Limit: 2, SortBy: 'SortName' });
         const state = reactive({ items: res.Items });
         try {
-            const row = await downloadItem(server, state.items[state.items.length - 1]);
+            const row = await downloadItem(server, state.items[state.items.length - 1], {});
             return { ok: true, state: row.state };
         } catch (err) {
             return { ok: false, error: String(err.message || err) };
@@ -394,6 +397,115 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         playedHls.error || `t=${playedHls.currentTime.toFixed(2)}s`);
     await page.evaluate(() => { const v = document.querySelector('video'); if (v) { v.pause(); } });
 
+    // ---- 6b. images, subtitles, burn-in ----------------------------------
+
+    const imageProbe = await page.evaluate(async (id) => {
+        const res = await fetch(`/Items/${id}/Images/Primary?fillWidth=400&quality=90`);
+        return { status: res.status, type: res.headers.get('Content-Type'), bytes: (await res.arrayBuffer()).byteLength };
+    }, direct.id);
+    check('item artwork serves from storage',
+        imageProbe.status === 200 && /^image\//.test(imageProbe.type || '') && imageProbe.bytes > 1000,
+        `${imageProbe.status} ${imageProbe.type} ${imageProbe.bytes}b`);
+
+    // An item with nine extractable text tracks.
+    const subtitled = await page.evaluate(async (pid, id) => {
+        const { knownServers, SourceServer } = await import('/web/plugin/source.js');
+        const { downloadItem, inspectSubtitles } = await import('/web/plugin/downloader.js');
+        const server = new SourceServer(knownServers(pid)[0]);
+        const item = await server.item(id);
+        const inspected = await inspectSubtitles(server, item);
+        const row = await downloadItem(server, item, {});
+
+        const info = await (await fetch(`/Items/${id}/PlaybackInfo`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+        })).json();
+        const ms = info.MediaSources[0];
+        const subs = (ms.MediaStreams || []).filter((st) => st.Type === 'Subtitle');
+        const first = subs[0];
+        const fetched = first ? await fetch(first.DeliveryUrl) : null;
+        const body = fetched ? await fetched.text() : '';
+        return {
+            offered: inspected.tracks.length,
+            extractable: inspected.tracks.filter((t) => t.canExtract).length,
+            stored: row.subtitles.length,
+            exposed: subs.length,
+            external: subs.every((st) => st.DeliveryMethod === 'External' && st.Codec === 'webvtt'),
+            status: fetched ? fetched.status : 0,
+            isVtt: body.trim().startsWith('WEBVTT')
+        };
+    }, phantomId, SUBTITLE_ITEM);
+    check('text subtitle tracks are extracted', subtitled.stored > 0,
+        `${subtitled.stored} of ${subtitled.extractable} extractable, ${subtitled.offered} offered`);
+    check('held subtitles are offered as external webvtt',
+        subtitled.exposed === subtitled.stored && subtitled.external,
+        `${subtitled.exposed} exposed`);
+    check('a subtitle file serves as WebVTT',
+        subtitled.status === 200 && subtitled.isVtt, `${subtitled.status}`);
+
+    // An item whose only subtitles are picture-based: the burn-in decision.
+    const burned = await page.evaluate(async (pid, id) => {
+        const { knownServers, SourceServer } = await import('/web/plugin/source.js');
+        const { downloadItem, inspectSubtitles } = await import('/web/plugin/downloader.js');
+        const server = new SourceServer(knownServers(pid)[0]);
+        const item = await server.item(id);
+        const { tracks } = await inspectSubtitles(server, item);
+        const picture = tracks.find((t) => !t.canExtract);
+        if (!picture) return { error: 'no picture-based track on the fixture' };
+
+        const row = await downloadItem(server, item, { subtitle: { mode: 'burn', index: picture.index } });
+        const info = await (await fetch(`/Items/${id}/PlaybackInfo`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+        })).json();
+        const ms = info.MediaSources[0];
+        return {
+            needsChoice: true,
+            codec: picture.codec,
+            mode: row.mode,
+            burnedIndex: row.burnedSubtitleIndex,
+            state: row.state,
+            segments: row.segments,
+            subtitleStreams: (ms.MediaStreams || []).filter((st) => st.Type === 'Subtitle').length
+        };
+    }, phantomId, BURN_ITEM);
+    check('a picture-based track is recognised as needing a decision',
+        !burned.error && burned.needsChoice, burned.error || burned.codec);
+    check('burning in forces a transcode and records the choice',
+        burned.mode === 'hls' && burned.burnedIndex != null && burned.state === 'complete',
+        `${burned.mode}, index ${burned.burnedIndex}, ${burned.segments} segments`);
+    check('a burned-in track is not also offered as a switchable one',
+        burned.subtitleStreams === 0, String(burned.subtitleStreams));
+
+    // ---- 6c. the offline app shell ---------------------------------------
+
+    const manifest = await page.evaluate(async () => {
+        const res = await fetch('/web/precache-manifest.json', { cache: 'no-store' });
+        const body = await res.json();
+        return { status: res.status, version: body.version, files: body.files.length };
+    });
+    check('the host publishes a precache manifest',
+        manifest.status === 200 && manifest.files > 100, `${manifest.files} files, ${manifest.version}`);
+
+    const precached = await page.evaluate(async () => {
+        const wait = async (fn, ms) => {
+            const end = Date.now() + ms;
+            while (Date.now() < end) {
+                if (fn()) return true;
+                await new Promise((r) => setTimeout(r, 500));
+            }
+            return false;
+        };
+        await wait(() => window.__phantom.precache.total > 0, 20000);
+        const started = window.__phantom.precache.done;
+        const total = window.__phantom.precache.total;
+        // It may already have finished: the run before this point is long enough
+        // for 2400 files over localhost, and "no progress" then means done, not stuck.
+        const grew = started >= total
+            || await wait(() => window.__phantom.precache.done > started + 50, 40000);
+        return { total, done: window.__phantom.precache.done, grew };
+    });
+    check('the app shell precaches in the background', precached.grew === true,
+        `${precached.done} of ${precached.total}`);
+
     // ---- 7. play state ----------------------------------------------------
 
     const playstate = await page.evaluate(async (itemId) => {
@@ -554,6 +666,19 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     }, direct.id);
     check('media serves with no network', offlineMedia.status === 206 && offlineMedia.bytes === 1024,
         `${offlineMedia.status} ${offlineMedia.bytes} ${offlineMedia.url}`);
+    const offlineRoute = await page.evaluate(async () => {
+        // A lazily-loaded chunk for a route this session never opened. Cached on
+        // demand it would not be here; precached, it is.
+        const manifest = await caches.open('phantom-app').then((c) => c.keys());
+        const chunks = manifest.map((r) => new URL(r.url).pathname).filter((p) => p.endsWith('.chunk.js'));
+        if (!chunks.length) return { error: 'no chunks held' };
+        const res = await fetch(chunks[Math.floor(chunks.length / 2)]);
+        return { status: res.status, held: chunks.length, sample: chunks[Math.floor(chunks.length / 2)] };
+    });
+    check('an unvisited route\'s code is available with no network',
+        !offlineRoute.error && offlineRoute.status === 200,
+        offlineRoute.error || `${offlineRoute.held} chunks held`);
+
     await page.setOfflineMode(false);
 
     // ---- errors -----------------------------------------------------------

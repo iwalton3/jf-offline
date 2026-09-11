@@ -12,6 +12,13 @@
 - Playback of both, through jellyfin-web's own player, with the network off.
 - Play state tracked locally, and pushed into open grids over the socket stand-in.
 - Primary, thumb, logo and one backdrop image per item.
+- **Subtitles.** Every text track is extracted as a switchable WebVTT sidecar.
+  Picture-based tracks (PGS, VobSub, DVB) carry no text, so the settings page asks
+  at sync time whether to burn one into the video — which forces a transcode and
+  fixes the choice for good, and is therefore a decision only the person
+  downloading can make.
+- **The whole web client held offline**, so airplane mode reaches routes that were
+  never visited.
 
 ## Out, deliberately
 
@@ -27,7 +34,7 @@
 - **Resuming a partial download** across a reload. A failed write is discarded
   rather than left truncated, so a retry starts clean.
 - Music, books, photos, live TV.
-- Subtitles, trickplay and chapter images.
+- Chapter images.
 - Multiple versions of one item. The downloader picks the best single source.
 
 ## Fixed since the first build, and why they were invisible
@@ -49,6 +56,12 @@
 - **Persistent storage was never requested**, so the browser was free to evict
   the library. Asked for on the download gesture, which is the only time Firefox
   will grant it, and shown in the settings page.
+
+## Implemented but unverified
+
+**Trickplay** tiles are downloaded and served, and nothing exercises that path:
+the QA library has no trickplay generated, so there was nothing to download. It
+is written to fail quietly rather than to be trusted.
 
 ## Known non-issues
 

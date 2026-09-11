@@ -3,18 +3,33 @@
  * jellyfin-web resolves the page's data-controller through importModule and
  * constructs this module's default export with (viewElement, params). The UI is
  * vdx-web: plain ES modules, no build step, nothing added to jellyfin-web.
+ *
+ * Two layout rules run through all of it, because this page loads over a network
+ * and a page that reflows while it loads is unpleasant to use:
+ *
+ *  - Rows are a fixed height and the list is windowed, so a thousand items cost
+ *    the same as ten and nothing resizes as they arrive.
+ *  - Every region that can be empty reserves its height, so a status line
+ *    appearing does not shove the list out from under the pointer.
  */
 
-import { Component, defineComponent, html, each, when } from '/web/plugin/vdx-framework.js';
+import { Component, defineComponent, html, each, when } from '/web/plugin/vdx/lib/framework.js';
+import '/web/plugin/vdx/ui/selection/dropdown.js';
+import '/web/plugin/vdx/ui/data/virtual-list.js';
 import { knownServers, SourceServer } from '/web/plugin/source.js';
 import {
-    downloadItem, downloadSeries, removeDownload, listDownloads, ensurePersistentStorage
+    downloadItem, downloadSeries, removeDownload, listDownloads,
+    ensurePersistentStorage, inspectSubtitles
 } from '/web/plugin/downloader.js';
 
-// One request to the source server per press of Load more. Large libraries are
-// the normal case, so the list pages rather than truncating at some limit that
-// looks like the whole library.
+// One request per press of Load more, and per automatic top-up when the list is
+// scrolled near its end.
 const PAGE = 100;
+const ROW_HEIGHT = 52;
+const LIST_HEIGHT = 420;
+// Start the next page while this much already-loaded list remains, so the fetch
+// is usually finished before the user reaches the bottom.
+const SCROLL_THRESHOLD = ROW_HEIGHT * 6;
 
 const fmtBytes = (n) => {
     if (!n) return '0 B';
@@ -31,46 +46,155 @@ class OfflineSyncManager extends Component {
         viewId: '',
         items: [],
         itemsTotal: 0,
+        loadingItems: false,
         downloads: [],
         held: [],
         storage: { usage: 0, quota: 0 },
         persisted: false,
-        persistSupported: true,
+        precache: { done: 0, total: 0 },
         status: '',
         error: '',
         busy: false,
-        loadingItems: false
-    }
+        // The subtitle question, asked about one item at a time.
+        asking: null,
+        askTracks: [],
+        askChoice: 'auto'
+    };
 
     static styles = /*css*/`
-        .osx { display: flex; flex-direction: column; gap: 1.25em; }
-        .osx-row { display: flex; flex-wrap: wrap; gap: .75em; align-items: flex-end; }
-        .osx-field { display: flex; flex-direction: column; gap: .3em; min-width: 15em; }
-        .osx-field label { font-size: .8em; text-transform: uppercase; letter-spacing: .06em; opacity: .7; }
-        .osx-field select { padding: .5em; }
-        .osx-note { opacity: .7; font-size: .9em; }
-        .osx-error { color: #e08189; }
-        .osx-list { display: flex; flex-direction: column; border: 1px solid rgba(128,128,128,.3); }
-        .osx-item { display: flex; gap: .75em; align-items: center; padding: .55em .8em;
-                    border-bottom: 1px solid rgba(128,128,128,.2); }
-        .osx-item:last-child { border-bottom: none; }
-        .osx-item-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .osx-tag { font-size: .75em; opacity: .65; text-transform: uppercase; letter-spacing: .06em; }
-        .osx-bar { height: 4px; background: rgba(128,128,128,.25); width: 8em; }
-        .osx-bar span { display: block; height: 100%; background: currentColor; }
-        .osx-scroll { max-height: 26em; overflow-y: auto; }
-        .osx h3 { margin: 0 0 .4em; }
+        :host {
+            /* vdx components read these through the shadow boundary, so the dark
+               palette is set once here rather than per component. */
+            --primary-color: #00a4dc;
+            --primary-hover: #0b8ec0;
+            --text-color: #dde1e6;
+            --text-secondary: #aab1b8;
+            --text-tertiary: #777d84;
+            --text-muted: #8b9299;
+            --input-bg: #202429;
+            --input-border: #3a4048;
+            --input-text: #dde1e6;
+            --hover-bg: #2b3038;
+            --selected-bg: #123044;
+            --disabled-bg: #2a2e34;
+            --border-color: #343a42;
+            --card-bg: #1b1f24;
+            --error-color: #f0868e;
+            --success-color: #6dd36d;
+
+            display: block;
+            color: var(--text-color);
+            font-size: 14px;
+        }
+
+        .osx { display: flex; flex-direction: column; gap: 1.5em; }
+        .row { display: flex; flex-wrap: wrap; gap: .75em; align-items: flex-end; }
+        .field { display: flex; flex-direction: column; gap: .35em; min-width: 16em; flex: 1 1 16em; }
+        .field > label {
+            font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+            color: var(--text-muted);
+        }
+
+        h3 { margin: 0 0 .5em; font-size: 15px; font-weight: 600; color: var(--text-color); }
+        .note { color: var(--text-muted); font-size: 13px; margin: 0; }
+        .bad { color: var(--error-color); }
+        .good { color: var(--success-color); }
+
+        /* Reserved, so an appearing message never moves what is under it. */
+        .statusline { min-height: 1.4em; font-size: 13px; }
+
+        .panel {
+            border: 1px solid var(--border-color);
+            background: var(--card-bg);
+            border-radius: 3px;
+        }
+
+        .scroller {
+            height: ${LIST_HEIGHT}px;
+            overflow-y: auto;
+            overscroll-behavior: contain;
+        }
+
+        .item {
+            display: flex; align-items: center; gap: .75em;
+            height: ${ROW_HEIGHT}px;
+            padding: 0 .85em;
+            border-bottom: 1px solid var(--border-color);
+            box-sizing: border-box;
+        }
+        .item:last-child { border-bottom: none; }
+        .name {
+            flex: 1 1 auto; min-width: 0;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .tag {
+            flex: none;
+            font-size: 11px; color: var(--text-muted);
+            text-transform: uppercase; letter-spacing: .06em;
+        }
+        .tag.held { color: var(--primary-color); }
+
+        button.act {
+            flex: none;
+            background: transparent;
+            border: 1px solid var(--border-color);
+            color: var(--text-color);
+            border-radius: 3px;
+            padding: .35em .9em;
+            font: inherit; font-size: 13px;
+            cursor: pointer;
+            min-width: 6.5em;
+        }
+        button.act:hover:not(:disabled) { background: var(--hover-bg); border-color: var(--primary-color); }
+        button.act:disabled { opacity: .45; cursor: default; }
+        button.act.primary { border-color: var(--primary-color); color: var(--primary-color); }
+
+        /* The same height as a real row, so the list does not resize when data lands. */
+        .skeleton { display: flex; align-items: center; height: ${ROW_HEIGHT}px; padding: 0 .85em; }
+        .skeleton span {
+            display: block; height: 12px; border-radius: 2px;
+            background: linear-gradient(90deg, #23272d 25%, #2d3239 37%, #23272d 63%);
+            background-size: 400% 100%;
+            animation: shimmer 1.3s ease infinite;
+        }
+        @keyframes shimmer { 0% { background-position: 100% 0; } 100% { background-position: 0 0; } }
+        @media (prefers-reduced-motion: reduce) { .skeleton span { animation: none; } }
+
+        .bar { height: 4px; background: #2a2e34; border-radius: 2px; overflow: hidden; }
+        .bar > span { display: block; height: 100%; background: var(--primary-color); }
+
+        .ask {
+            border: 1px solid var(--primary-color);
+            background: var(--card-bg);
+            border-radius: 3px;
+            padding: 1em;
+            display: flex; flex-direction: column; gap: .8em;
+        }
     `;
 
+    // --- lifecycle --------------------------------------------------------
+
     async mounted() {
-        const servers = knownServers(window.PS_SCHEMA.ID.SERVER);
-        this.state.servers = servers;
-        if (servers.length === 1) {
-            this.state.serverId = servers[0].id;
+        this.state.servers = knownServers(window.PS_SCHEMA.ID.SERVER);
+        if (this.state.servers.length === 1) {
+            this.state.serverId = this.state.servers[0].id;
             await this.loadViews();
         }
         await this.refreshDownloads();
+
+        if (window.__phantom && window.__phantom.onPrecache) {
+            this._offPrecache = window.__phantom.onPrecache((p) => {
+                this.state.precache = { done: p.done, total: p.total };
+            });
+            window.__phantom.refreshPrecache();
+        }
     }
+
+    unmounted() {
+        if (this._offPrecache) this._offPrecache();
+    }
+
+    // --- data -------------------------------------------------------------
 
     server() {
         const info = this.state.servers.find((s) => s.id === this.state.serverId);
@@ -102,22 +226,6 @@ class OfflineSyncManager extends Component {
         }
     }
 
-    onServerChange(ev) {
-        this.state.serverId = ev.target.value;
-        this.state.views = [];
-        this.state.viewId = '';
-        this.state.items = [];
-        this.state.itemsTotal = 0;
-        if (this.state.serverId) this.loadViews();
-    }
-
-    onViewChange(ev) {
-        this.state.viewId = ev.target.value;
-        this.state.items = [];
-        this.state.itemsTotal = 0;
-        if (this.state.viewId) this.loadItems();
-    }
-
     async loadViews() {
         await this.guard('Loading libraries', async () => {
             const res = await this.server().views();
@@ -131,7 +239,10 @@ class OfflineSyncManager extends Component {
     async loadItems(append) {
         const view = this.state.views.find((v) => v.Id === this.state.viewId);
         if (!view) return;
+        if (this.state.loadingItems) return;
         const startIndex = append ? this.state.items.length : 0;
+        if (append && this.state.itemsTotal && startIndex >= this.state.itemsTotal) return;
+
         this.state.loadingItems = true;
         await this.guard(startIndex ? 'Loading more' : 'Loading items', async () => {
             const res = await this.server().items({
@@ -142,8 +253,8 @@ class OfflineSyncManager extends Component {
             });
             const page = res.Items || [];
             this.state.items = startIndex ? this.state.items.concat(page) : page;
-            // TotalRecordCount is what says there is more; the page length cannot,
-            // because a full page is also what the last page looks like.
+            // TotalRecordCount is what says there is more; a full page cannot,
+            // because that is also what the last page looks like.
             this.state.itemsTotal = res.TotalRecordCount != null
                 ? res.TotalRecordCount
                 : this.state.items.length;
@@ -155,30 +266,106 @@ class OfflineSyncManager extends Component {
         this.loadItems(true);
     }
 
-    download(item) {
+    /** Top up before the list runs out, so scrolling never stops at a boundary. */
+    onListScroll(ev) {
+        const el = ev.currentTarget;
+        if (!el) return;
+        const remaining = el.scrollHeight - el.scrollTop - el.clientHeight;
+        if (remaining < SCROLL_THRESHOLD) this.loadItems(true);
+    }
+
+    // --- selection --------------------------------------------------------
+
+    onServerChange(ev) {
+        this.state.serverId = ev.detail ? ev.detail.value : ev.target.value;
+        this.state.views = [];
+        this.state.viewId = '';
+        this.state.items = [];
+        this.state.itemsTotal = 0;
+        if (this.state.serverId) this.loadViews();
+    }
+
+    onViewChange(ev) {
+        this.state.viewId = ev.detail ? ev.detail.value : ev.target.value;
+        this.state.items = [];
+        this.state.itemsTotal = 0;
+        if (this.state.viewId) this.loadItems();
+    }
+
+    // --- the subtitle question -------------------------------------------
+
+    /**
+     * Ask before downloading, but only when there is something to ask.
+     *
+     * An item with no subtitles, or only extractable ones, has a right answer and
+     * asking would be noise. A picture-based track has no text to extract, so the
+     * only way to see it offline is to burn it in — which fixes the choice of
+     * track, forces a transcode, and cannot be changed without downloading the
+     * item again.
+     */
+    start(item) {
         const server = this.server();
-        // Asked here, in the click handler, because Firefox only grants persistence
-        // in response to a user gesture. Without it the browser is free to evict
-        // the whole library the moment it wants the space back.
+        this.guard(`Checking ${item.Name}`, async () => {
+            // A series is asked about once, using its first episode as the sample.
+            const sample = item.Type === 'Series'
+                ? ((await server.episodes(item.Id)).Items || [])[0]
+                : item;
+            if (!sample) throw new Error('series has no episodes');
+
+            const { tracks } = await inspectSubtitles(server, sample);
+            if (!tracks.some((t) => !t.canExtract)) {
+                await this.run(item, { mode: 'auto' });
+                return;
+            }
+            this.state.askTracks = tracks;
+            this.state.askChoice = 'auto';
+            this.state.asking = item;
+        });
+    }
+
+    confirmAsk() {
+        const item = this.state.asking;
+        const choice = this.state.askChoice;
+        this.state.asking = null;
+        const subtitle = choice === 'auto' || choice === 'none'
+            ? { mode: choice }
+            : { mode: 'burn', index: Number(choice) };
+        this.run(item, subtitle);
+    }
+
+    cancelAsk() {
+        this.state.asking = null;
+    }
+
+    onAskChange(ev) {
+        this.state.askChoice = ev.detail ? ev.detail.value : ev.target.value;
+    }
+
+    // --- downloading ------------------------------------------------------
+
+    run(item, subtitle) {
+        const server = this.server();
+        // Asked on the gesture, because Firefox only grants persistence while
+        // handling one. Without it the browser may evict the whole library.
         const persisting = ensurePersistentStorage();
-        this.guard(`Downloading ${item.Name}`, async () => {
+        return this.guard(`Downloading ${item.Name}`, async () => {
             const grant = await persisting;
             this.state.persisted = grant.persisted;
-            this.state.persistSupported = grant.supported;
+
+            const onProgress = (done, total, unit, name) => {
+                this.state.status = unit === 'bytes'
+                    ? `${item.Name}: ${fmtBytes(done)}${total ? ' of ' + fmtBytes(total) : ''}`
+                    : `${item.Name}: ${done} of ${total} ${unit}${name ? ' — ' + name : ''}`;
+            };
+
             if (item.Type === 'Series') {
-                const result = await downloadSeries(server, item, (done, total, unit, name) => {
-                    this.state.status = `${item.Name}: ${done}/${total} ${unit}` + (name ? ` — ${name}` : '');
-                });
+                const result = await downloadSeries(server, item, { subtitle, onProgress });
                 if (result.failures.length) {
                     this.state.error = `${result.failures.length} of ${result.episodes} episodes failed: `
                         + result.failures.map((f) => f.name).join(', ');
                 }
             } else {
-                await downloadItem(server, item, (done, total, unit) => {
-                    this.state.status = unit === 'bytes'
-                        ? `${item.Name}: ${fmtBytes(done)}${total ? ' of ' + fmtBytes(total) : ''}`
-                        : `${item.Name}: segment ${done} of ${total}`;
-                });
+                await downloadItem(server, item, { subtitle, onProgress });
             }
             await this.refreshDownloads();
             await window.__phantom.libraryChanged();
@@ -196,32 +383,92 @@ class OfflineSyncManager extends Component {
     async requestPersistence() {
         const grant = await ensurePersistentStorage();
         this.state.persisted = grant.persisted;
-        this.state.persistSupported = grant.supported;
+    }
+
+    // --- rendering --------------------------------------------------------
+
+    get serverOptions() {
+        return this.state.servers.map((s) => ({ label: s.name, value: s.id }));
+    }
+
+    get viewOptions() {
+        return this.state.views.map((v) => ({ label: v.Name, value: v.Id }));
+    }
+
+    get askOptions() {
+        const opts = [
+            { label: 'Extract text tracks as subtitles', value: 'auto' },
+            { label: 'No subtitles', value: 'none' }
+        ];
+        for (const t of this.state.askTracks) {
+            if (t.canExtract) continue;
+            opts.push({ label: `Burn in: ${t.title} (${t.codec})`, value: String(t.index) });
+        }
+        return opts;
+    }
+
+    renderItem(item) {
+        const held = this.state.held.includes(item.Id);
+        return html`
+            <div class="item">
+                <span class="name">${item.Name}</span>
+                <span class="tag">${item.Type}${item.ProductionYear ? ' · ' + item.ProductionYear : ''}</span>
+                ${when(held, () => html`<span class="tag held">held</span>`)}
+                <button class="act" disabled="${this.state.busy}"
+                    on-click="${() => this.start(item)}">Download</button>
+            </div>
+        `;
+    }
+
+    renderSkeletons() {
+        const widths = ['42%', '61%', '35%', '54%', '48%', '66%', '39%', '57%'];
+        return html`
+            <div>
+                ${each(widths, (w) => html`<div class="skeleton"><span style="width:${w}"></span></div>`)}
+            </div>
+        `;
+    }
+
+    renderPrecache() {
+        const { done, total } = this.state.precache;
+        const complete = total > 0 && done >= total;
+        const pct = total ? Math.min(100, (done / total) * 100) : 0;
+        return html`
+            <div>
+                <h3>Offline app</h3>
+                ${when(complete, () => html`
+                    <p class="note good">The whole web client is held offline. Airplane mode will work.</p>
+                `)}
+                ${when(!complete, () => html`
+                    <p class="note">
+                        Holding the web client for offline use: ${done} of ${total || '…'} files.
+                        Leave this page open until it finishes.
+                    </p>
+                    <div class="bar" style="margin-top:.4em"><span style="width:${pct.toFixed(1)}%"></span></div>
+                `)}
+            </div>
+        `;
     }
 
     renderStorage() {
         const { usage, quota } = this.state.storage;
         const pct = quota ? Math.min(100, (usage / quota) * 100) : 0;
         return html`
-            <div class="osx-note">
-                Using ${fmtBytes(usage)} of ${fmtBytes(quota)} available to this site
-                <div class="osx-bar" style="width:100%;margin-top:.35em">
-                    <span style="width:${pct.toFixed(1)}%"></span>
+            <div>
+                <h3>Storage</h3>
+                <p class="note">Using ${fmtBytes(usage)} of ${fmtBytes(quota)} available to this site</p>
+                <div class="bar" style="margin-top:.4em"><span style="width:${pct.toFixed(1)}%"></span></div>
+                <div class="statusline" style="margin-top:.5em">
+                    ${when(this.state.persisted, () => html`
+                        <span class="note good">Storage is persistent. Downloads stay until you remove them.</span>
+                    `)}
+                    ${when(!this.state.persisted, () => html`
+                        <span class="note bad">Storage is not persistent — the browser may delete downloads.</span>
+                        <button class="act" style="margin-left:.6em"
+                            on-click="${() => this.requestPersistence()}">Make persistent</button>
+                    `)}
                 </div>
             </div>
-            ${when(this.state.persisted, () => html`
-                <p class="osx-note">Storage is persistent. Downloads survive until you remove them.</p>
-            `)}
-            ${when(!this.state.persisted, () => html`
-                <div class="osx-row" style="align-items:center">
-                    <span class="osx-error">
-                        Storage is not persistent — the browser may delete downloads to reclaim space.
-                    </span>
-                    <button class="emby-button raised" on-click="${() => this.requestPersistence()}">
-                        Make persistent
-                    </button>
-                </div>
-            `)}
         `;
     }
 
@@ -230,65 +477,80 @@ class OfflineSyncManager extends Component {
         return html`
             <div class="osx">
                 ${when(!s.servers.length, () => html`
-                    <p class="osx-note">
+                    <p class="note">
                         No other servers are signed in yet. Add your Jellyfin server from the
                         server selection screen and sign in, then come back here.
                     </p>
                 `)}
 
                 ${when(s.servers.length > 0, () => html`
-                    <div class="osx-row">
-                        <div class="osx-field">
+                    <div class="row">
+                        <div class="field">
                             <label for="osx-server">Source server</label>
-                            <select id="osx-server" on-change="${this.onServerChange}">
-                                <option value="">Choose a server</option>
-                                ${each(s.servers, (srv) => html`
-                                    <option value="${srv.id}" selected="${srv.id === s.serverId}">${srv.name}</option>
-                                `)}
-                            </select>
+                            <cl-dropdown id="osx-server"
+                                options="${this.serverOptions}"
+                                value="${s.serverId}"
+                                placeholder="Choose a server"
+                                on-change="${(ev) => this.onServerChange(ev)}"></cl-dropdown>
                         </div>
-                        <div class="osx-field">
+                        <div class="field">
                             <label for="osx-view">Library</label>
-                            <select id="osx-view" on-change="${this.onViewChange}" disabled="${!s.views.length}">
-                                <option value="">Choose a library</option>
-                                ${each(s.views, (v) => html`
-                                    <option value="${v.Id}" selected="${v.Id === s.viewId}">${v.Name}</option>
-                                `)}
-                            </select>
+                            <cl-dropdown id="osx-view"
+                                options="${this.viewOptions}"
+                                value="${s.viewId}"
+                                placeholder="Choose a library"
+                                disabled="${!s.views.length}"
+                                on-change="${(ev) => this.onViewChange(ev)}"></cl-dropdown>
                         </div>
                     </div>
                 `)}
 
-                ${when(!!s.status, () => html`<p class="osx-note">${s.status}</p>`)}
-                ${when(!!s.error, () => html`<p class="osx-error">${s.error}</p>`)}
+                <div class="statusline">
+                    ${when(!!s.status, () => html`<span class="note">${s.status}</span>`)}
+                    ${when(!!s.error, () => html`<span class="bad">${s.error}</span>`)}
+                </div>
 
-                ${when(s.items.length > 0, () => html`
+                ${when(!!s.asking, () => html`
+                    <div class="ask">
+                        <h3>Subtitles for ${s.asking.Name}</h3>
+                        <p class="note">
+                            This item has picture-based subtitles. They carry no text to extract,
+                            so the only way to see them offline is to burn one track into the
+                            video. That means transcoding, and it fixes the choice for good.
+                        </p>
+                        <div class="field">
+                            <label for="osx-subs">Subtitles</label>
+                            <cl-dropdown id="osx-subs"
+                                options="${this.askOptions}"
+                                value="${s.askChoice}"
+                                on-change="${(ev) => this.onAskChange(ev)}"></cl-dropdown>
+                        </div>
+                        <div class="row">
+                            <button class="act primary" on-click="${() => this.confirmAsk()}">Download</button>
+                            <button class="act" on-click="${() => this.cancelAsk()}">Cancel</button>
+                        </div>
+                    </div>
+                `)}
+
+                ${when(!!s.viewId, () => html`
                     <div>
                         <h3>Available to download</h3>
-                        <div class="osx-list osx-scroll">
-                            ${each(s.items, (item) => html`
-                                <div class="osx-item">
-                                    <span class="osx-item-name">${item.Name}</span>
-                                    <span class="osx-tag">${item.Type}${item.ProductionYear ? ' · ' + item.ProductionYear : ''}</span>
-                                    ${when(s.held.includes(item.Id), () => html`<span class="osx-tag">held</span>`)}
-                                    <button
-                                        class="emby-button raised"
-                                        disabled="${s.busy}"
-                                        on-click="${() => this.download(item)}"
-                                    >Download</button>
-                                </div>
-                            `, (item) => item.Id)}
+                        <div class="panel scroller" on-scroll="${(ev) => this.onListScroll(ev)}">
+                            ${when(!s.items.length, () => this.renderSkeletons())}
+                            ${when(s.items.length > 0, () => html`
+                                <cl-virtual-list
+                                    items="${s.items}"
+                                    itemHeight="${ROW_HEIGHT}"
+                                    scrollContainer="parent"
+                                    renderItem="${(item) => this.renderItem(item)}"
+                                    keyFn="${(item) => item.Id}"></cl-virtual-list>
+                            `)}
                         </div>
-                        <div class="osx-row" style="margin-top:.6em;align-items:center">
-                            <span class="osx-note">
-                                Showing ${s.items.length} of ${s.itemsTotal}
-                            </span>
+                        <div class="row" style="margin-top:.6em; align-items:center">
+                            <span class="note">Showing ${s.items.length} of ${s.itemsTotal}</span>
                             ${when(s.items.length < s.itemsTotal, () => html`
-                                <button
-                                    class="emby-button raised"
-                                    disabled="${s.busy || s.loadingItems}"
-                                    on-click="${() => this.loadMore()}"
-                                >Load more</button>
+                                <button class="act" disabled="${s.busy || s.loadingItems}"
+                                    on-click="${() => this.loadMore()}">Load more</button>
                             `)}
                         </div>
                     </div>
@@ -296,26 +558,30 @@ class OfflineSyncManager extends Component {
 
                 <div>
                     <h3>Downloaded</h3>
-                    ${this.renderStorage()}
-                    ${when(!s.downloads.length, () => html`<p class="osx-note">Nothing downloaded yet.</p>`)}
+                    ${when(!s.downloads.length, () => html`<p class="note">Nothing downloaded yet.</p>`)}
                     ${when(s.downloads.length > 0, () => html`
-                        <div class="osx-list osx-scroll" style="margin-top:.6em">
+                        <div class="panel" style="max-height:${LIST_HEIGHT}px; overflow-y:auto">
                             ${each(s.downloads, (row) => html`
-                                <div class="osx-item">
-                                    <span class="osx-item-name">${row.name || row.itemId}</span>
-                                    <span class="osx-tag">${row.type} · ${row.mode} · ${fmtBytes(row.bytesDone)}</span>
-                                    <span class="osx-tag">${row.state}</span>
-                                    ${when(!!row.error, () => html`<span class="osx-error">${row.error}</span>`)}
-                                    <button
-                                        class="emby-button raised"
-                                        disabled="${s.busy}"
-                                        on-click="${() => this.removeHeld(row)}"
-                                    >Remove</button>
+                                <div class="item">
+                                    <span class="name">${row.name || row.itemId}</span>
+                                    <span class="tag">${row.mode} · ${fmtBytes(row.bytesDone)}</span>
+                                    ${when(!!(row.subtitles && row.subtitles.length), () => html`
+                                        <span class="tag">${row.subtitles.length} subs</span>
+                                    `)}
+                                    ${when(row.burnedSubtitleIndex != null, () => html`
+                                        <span class="tag held">burned in</span>
+                                    `)}
+                                    <span class="tag">${row.state}</span>
+                                    <button class="act" disabled="${s.busy}"
+                                        on-click="${() => this.removeHeld(row)}">Remove</button>
                                 </div>
                             `, (row) => row.srv + row.itemId + row.sourceId)}
                         </div>
                     `)}
                 </div>
+
+                ${this.renderStorage()}
+                ${this.renderPrecache()}
             </div>
         `;
     }

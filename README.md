@@ -36,11 +36,22 @@ Two files in the built output, neither of them application code:
 `serve.py` does not copy them over the build. It serves `overlay/` in front of
 `dist/`, so the overlay directory **is** the diff.
 
+### Offline, properly
+
+The app itself is held offline, not just the media. jellyfin-web is two thousand
+lazily-loaded chunks, so caching on demand leaves every route nobody visited
+broken in airplane mode, and there is no way to know in advance which those are.
+The host publishes `/web/precache-manifest.json` (a build artifact in a real
+deployment) and the worker holds the lot — about 55 MB — resumably in the
+background, because a worker doing that many fetches will be killed part-way. The
+settings page shows the progress.
+
 ### Two things the host must do
 
 Both exist because they have to happen *before* the worker does, and a static
 host can do both.
 
+0. Publish `/web/precache-manifest.json`, as above.
 1. **Answer `GET /System/Info/Public`** with the phantom server's identity — one
    JSON file. jellyfin-web probes for a server during boot and registers the
    worker only afterwards, so on a first visit the probe has nobody to talk to,
@@ -132,6 +143,17 @@ page — so the downloader and the server share one schema rather than two copie
   endpoints, which are exactly the two a download needs.
 - **Downloads run in the page, not the worker.** A worker is killed after a short
   idle and takes the download with it.
+- **jellyfin-web loads a 2015 custom-elements polyfill** (webcomponents.js 0.7),
+  because every one of its `emby-*` elements is registered through
+  `document.registerElement`. That polyfill replaces `document.createElement`, and
+  an element made through the replacement is never upgraded by the *native*
+  registry. Measured in the page: the parser and `importNode` upgrade correctly
+  and only `createElement` does not, so `tools/sync-vdx.sh` rewrites that one call
+  in the copied vdx sources. Unpatching globally would break jellyfin-web itself.
+- **The router matches on a lower-cased path**, so handlers receive lower-cased
+  captures. Image types are written by the downloader with Jellyfin's own
+  capitalisation, so `paths.image` normalises; anything else that round-trips a
+  capture through storage has to do the same.
 - **Cache-first is only safe for a URL that pins its content.** jellyfin-web's
   bundles carry a content hash; the overlay's files do not, so they are served
   network-first. Cached first, they serve last session's module forever, and the

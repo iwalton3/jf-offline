@@ -102,6 +102,84 @@ function pickMediaSource(sources) {
         || null;
 }
 
+/**
+ * Subtitle tracks and what can be done with each of them offline.
+ *
+ * A text track can be extracted to a sidecar the player switches between. An
+ * image track (PGS, VobSub, DVB) has no text to extract, so the only way to see
+ * it offline is to burn it into the picture — which fixes the choice of track
+ * and forces a transcode, and is therefore a decision for the person syncing.
+ */
+export function subtitleOptions(mediaSource) {
+    return (mediaSource.MediaStreams || [])
+        .filter((st) => st.Type === 'Subtitle')
+        .map((st) => ({
+            index: st.Index,
+            language: st.Language || 'und',
+            title: st.DisplayTitle || st.Title || st.Language || ('Track ' + st.Index),
+            codec: st.Codec,
+            isForced: !!st.IsForced,
+            isDefault: !!st.IsDefault,
+            // The whole decision hangs off this flag.
+            canExtract: !!st.IsTextSubtitleStream
+        }));
+}
+
+async function downloadSubtitles(server, dto, mediaSource, tracks) {
+    const held = [];
+    for (const track of tracks) {
+        try {
+            const res = await server.fetch(server.subtitleUrl(dto.Id, mediaSource.Id, track.index));
+            const body = await res.text();
+            if (!body.trim()) continue;
+            await OPFS().writeBlob(
+                S().paths.subtitle(server.id, dto.Id, mediaSource.Id, track.index),
+                new Blob([body], { type: 'text/vtt' })
+            );
+            held.push({ index: track.index, language: track.language, title: track.title });
+        } catch (err) {
+            // A track that will not extract is not worth failing the item over.
+            console.warn('[phantom] subtitle', track.index, dto.Id, err.message);
+        }
+    }
+    return held;
+}
+
+/**
+ * Scrubbing thumbnails, when the source server has generated them.
+ *
+ * Unverified against a server that actually has them: the QA library has none.
+ * Written to fail quietly for that reason rather than to be trusted.
+ */
+async function downloadTrickplay(server, dto, mediaSource) {
+    const byWidth = (dto.Trickplay || {})[mediaSource.Id];
+    if (!byWidth) return null;
+
+    const widths = Object.keys(byWidth).map(Number).filter(Number.isFinite);
+    if (!widths.length) return null;
+    const width = Math.max(...widths);
+    const info = byWidth[width];
+    if (!info || !info.ThumbnailCount || !info.TileWidth || !info.TileHeight) return null;
+
+    const perTile = info.TileWidth * info.TileHeight;
+    const tiles = Math.ceil(info.ThumbnailCount / perTile);
+    let stored = 0;
+    for (let i = 0; i < tiles; i++) {
+        try {
+            const res = await server.fetch(server.trickplayTileUrl(dto.Id, width, i));
+            await OPFS().writeBlob(
+                S().paths.trickplayTile(server.id, dto.Id, mediaSource.Id, width, i),
+                await res.blob()
+            );
+            stored++;
+        } catch (err) {
+            console.warn('[phantom] trickplay tile', i, dto.Id, err.message);
+            break;
+        }
+    }
+    return stored ? Object.assign({ width, tiles: stored }, info) : null;
+}
+
 async function setRow(row, changes) {
     const next = Object.assign({}, row, changes, { updatedAt: Date.now() });
     await DB().put('downloads', next);
@@ -129,6 +207,20 @@ async function downloadDirect(server, dto, mediaSource, row, onProgress) {
     return { container, bytes: written };
 }
 
+/**
+ * Add parameters to a URL the server built for us.
+ *
+ * Burning a subtitle in is a property of the transcode, so it has to ride on the
+ * TranscodingUrl rather than be requested separately; the server hands back a
+ * playlist whose segments already have the subtitle in the picture.
+ */
+function withParams(url, params) {
+    if (!params) return url;
+    const u = new URL(url);
+    for (const [k, v] of Object.entries(params)) u.searchParams.set(k, String(v));
+    return u.toString();
+}
+
 /** The segment URIs out of a variant playlist, resolved against its own URL. */
 function segmentUrls(playlist, playlistUrl) {
     return playlist
@@ -146,8 +238,8 @@ function segmentUrls(playlist, playlistUrl) {
  * are fetched in order on purpose: asking for one out of order makes the server
  * restart ffmpeg at an offset, which is correct and slow.
  */
-async function downloadHls(server, dto, mediaSource, row, onProgress) {
-    const masterUrl = server.url + mediaSource.TranscodingUrl;
+async function downloadHls(server, dto, mediaSource, row, onProgress, extraParams) {
+    const masterUrl = withParams(server.url + mediaSource.TranscodingUrl, extraParams);
     const master = await (await server.fetch(masterUrl)).text();
 
     // A master playlist points at one variant; a server that answered with the
@@ -157,7 +249,7 @@ async function downloadHls(server, dto, mediaSource, row, onProgress) {
     if (master.includes('#EXT-X-STREAM-INF')) {
         const line = master.split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('#'));
         if (!line) throw new Error('master playlist named no variant');
-        variantUrl = new URL(line, masterUrl).toString();
+        variantUrl = withParams(new URL(line, masterUrl).toString(), extraParams);
         variant = await (await server.fetch(variantUrl)).text();
     }
 
@@ -188,16 +280,29 @@ async function downloadHls(server, dto, mediaSource, row, onProgress) {
 /**
  * Download one playable item.
  *
- * `onProgress(done, total, unit)` is called as it goes; unit is 'bytes' for an
- * original and 'segments' for a transcode.
+ * `options.onProgress(done, total, unit)` is called as it goes; unit is 'bytes'
+ * for an original and 'segments' for a transcode.
+ *
+ * `options.subtitle` is the decision that cannot be revisited later:
+ *   {mode:'auto'}            every text track as a switchable sidecar (default)
+ *   {mode:'burn', index:N}   track N burned into the picture, forcing a transcode
+ *   {mode:'none'}            no subtitles at all
  */
-export async function downloadItem(server, reactiveDto, onProgress = () => {}) {
+export async function downloadItem(server, reactiveDto, options = {}) {
     const dto = plain(reactiveDto);
+    const onProgress = options.onProgress || (() => {});
+    const subtitle = options.subtitle || { mode: S().SUBTITLE_MODE.AUTO };
+
     const info = await server.playbackInfo(dto.Id);
     const mediaSource = pickMediaSource(info.MediaSources || []);
     if (!mediaSource) throw new Error('server offered no media source');
 
-    const canDirect = (mediaSource.SupportsDirectPlay || mediaSource.SupportsDirectStream)
+    const tracks = subtitleOptions(mediaSource);
+    const burning = subtitle.mode === S().SUBTITLE_MODE.BURN && subtitle.index != null;
+
+    // Burning is a picture operation, so it can only happen during a transcode.
+    const canDirect = !burning
+        && (mediaSource.SupportsDirectPlay || mediaSource.SupportsDirectStream)
         && directPlayable(mediaSource.Container);
     const mode = canDirect ? S().DOWNLOAD_MODE.DIRECT : S().DOWNLOAD_MODE.HLS;
 
@@ -219,6 +324,10 @@ export async function downloadItem(server, reactiveDto, onProgress = () => {}) {
         mediaStreams: mediaSource.MediaStreams || [],
         defaultAudioStreamIndex: mediaSource.DefaultAudioStreamIndex != null ? mediaSource.DefaultAudioStreamIndex : null,
         bitrate: mediaSource.Bitrate || 0,
+        subtitleMode: subtitle.mode,
+        burnedSubtitleIndex: burning ? subtitle.index : null,
+        subtitles: [],
+        trickplay: null,
         // Never null, and always written. Auto-download does not exist yet, but a
         // nullable origin meeting three-valued logic is how a reaper ends up
         // eligible to delete the things a person asked for.
@@ -232,13 +341,26 @@ export async function downloadItem(server, reactiveDto, onProgress = () => {}) {
     await DB().put('downloads', row);
 
     try {
+        const burnParams = burning
+            ? { SubtitleStreamIndex: subtitle.index, SubtitleMethod: 'Encode' }
+            : null;
+
         const result = mode === S().DOWNLOAD_MODE.DIRECT
             ? await downloadDirect(server, dto, mediaSource, row, (done, total) => {
                 onProgress(done, total, 'bytes');
             })
             : await downloadHls(server, dto, mediaSource, row, (done, total) => {
                 onProgress(done, total, 'segments');
-            });
+            }, burnParams);
+
+        // Sidecars only make sense when nothing was burned in: a burned track is
+        // in the picture, and offering it again as a switchable overlay would
+        // draw it twice.
+        const held = burning || subtitle.mode === S().SUBTITLE_MODE.NONE
+            ? []
+            : await downloadSubtitles(server, dto, mediaSource, tracks.filter((t) => t.canExtract));
+
+        const trickplay = await downloadTrickplay(server, dto, mediaSource);
 
         await putItem(server, dto);
         await putImages(server, dto);
@@ -248,7 +370,9 @@ export async function downloadItem(server, reactiveDto, onProgress = () => {}) {
             container: result.container,
             bytesDone: result.bytes,
             bytesTotal: result.bytes,
-            segments: result.segments || 0
+            segments: result.segments || 0,
+            subtitles: held,
+            trickplay
         });
         return row;
     } catch (err) {
@@ -258,13 +382,28 @@ export async function downloadItem(server, reactiveDto, onProgress = () => {}) {
 }
 
 /**
+ * The subtitle tracks an item offers, without downloading anything.
+ *
+ * The settings page needs this before it can ask the question, and the answer
+ * only exists in a PlaybackInfo response.
+ */
+export async function inspectSubtitles(server, reactiveDto) {
+    const dto = plain(reactiveDto);
+    const info = await server.playbackInfo(dto.Id);
+    const mediaSource = pickMediaSource(info.MediaSources || []);
+    if (!mediaSource) return { tracks: [], container: null };
+    return { tracks: subtitleOptions(mediaSource), container: mediaSource.Container };
+}
+
+/**
  * Download a whole series.
  *
  * The series and season rows are stored even though neither has media, because
  * offline browsing has nobody to ask what an episode belongs to.
  */
-export async function downloadSeries(server, reactiveSeriesDto, onProgress = () => {}) {
+export async function downloadSeries(server, reactiveSeriesDto, options = {}) {
     const seriesDto = plain(reactiveSeriesDto);
+    const onProgress = options.onProgress || (() => {});
     const [seasons, episodes] = await Promise.all([
         server.seasons(seriesDto.Id),
         server.episodes(seriesDto.Id)
@@ -282,7 +421,7 @@ export async function downloadSeries(server, reactiveSeriesDto, onProgress = () 
     for (let i = 0; i < list.length; i++) {
         onProgress(i, list.length, 'episodes', list[i].Name);
         try {
-            await downloadItem(server, list[i]);
+            await downloadItem(server, list[i], { subtitle: options.subtitle });
         } catch (err) {
             // One unplayable episode should not abandon the rest of the series.
             failures.push({ name: list[i].Name, error: String(err.message || err) });

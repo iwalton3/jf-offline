@@ -43,7 +43,7 @@ if (IS_SERVICE_WORKER) {
     );
 }
 
-const APP_CACHE = 'phantom-app-v2';
+const APP_CACHE = 'phantom-app';
 
 if (IS_SERVICE_WORKER) {
     self.addEventListener('install', (event) => {
@@ -53,7 +53,7 @@ if (IS_SERVICE_WORKER) {
     self.addEventListener('activate', (event) => {
         event.waitUntil((async () => {
             for (const name of await caches.keys()) {
-                if (name.startsWith('phantom-app-') && name !== APP_CACHE) await caches.delete(name);
+                if (name.startsWith('phantom-app') && name !== APP_CACHE) await caches.delete(name);
             }
             await self.clients.claim();
         })());
@@ -133,6 +133,80 @@ if (IS_SERVICE_WORKER) {
         }
     }
 
+    // --- offline app shell ---------------------------------------------------
+
+    let precacheRun = null;
+
+    /**
+     * Hold the whole app, not just the parts that have been used.
+     *
+     * jellyfin-web is two thousand lazily-loaded chunks, so caching on demand
+     * leaves every route the user has not visited yet broken in airplane mode,
+     * and there is no way to know in advance which routes those are.
+     *
+     * Resumable on purpose: a worker doing two thousand fetches will be killed
+     * part-way, so each file is skipped if the cache already holds it and the run
+     * simply picks up where it stopped when something wakes the worker again.
+     * ps-bootstrap.js pokes it while a page is open, which is what keeps it alive.
+     */
+    async function precacheAppShell() {
+        if (precacheRun) return precacheRun;
+        precacheRun = (async () => {
+            const manifest = await (await fetch('/web/precache-manifest.json', { cache: 'no-store' })).json();
+            const held = await self.PS_DB.meta.get('precacheVersion', null);
+
+            if (held !== manifest.version) {
+                // The build changed: everything held describes the previous one.
+                await caches.delete(APP_CACHE);
+                await self.PS_DB.meta.set('precacheVersion', manifest.version);
+            }
+
+            const fresh = await caches.open(APP_CACHE);
+            const pending = [];
+            for (const url of manifest.files) {
+                if (!(await fresh.match(url))) pending.push(url);
+            }
+
+            let done = manifest.files.length - pending.length;
+            const total = manifest.files.length;
+            const report = () => self.PS_NOTIFY.precacheProgress({ done, total, version: manifest.version });
+            report();
+
+            // Small concurrency: enough to keep the connection busy, not so much
+            // that the precache competes with whatever the user is doing.
+            const CONCURRENCY = 6;
+            let cursor = 0;
+            const worker = async () => {
+                for (;;) {
+                    const index = cursor++;
+                    if (index >= pending.length) return;
+                    const url = pending[index];
+                    try {
+                        const res = await fetch(url, { cache: 'no-store' });
+                        if (res.ok) await fresh.put(url, res);
+                    } catch {
+                        // One unreachable file must not abandon the other 2399.
+                    }
+                    done++;
+                    if (done % 25 === 0) report();
+                }
+            };
+            await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+            report();
+            return { done, total, version: manifest.version };
+        })().finally(() => { precacheRun = null; });
+        return precacheRun;
+    }
+
+    async function precacheStatus() {
+        const manifest = await (await fetch('/web/precache-manifest.json', { cache: 'no-store' }))
+            .json().catch(() => null);
+        if (!manifest) return { offline: true };
+        const cache = await caches.open(APP_CACHE);
+        const keys = await cache.keys();
+        return { done: keys.length, total: manifest.files.length, version: manifest.version };
+    }
+
     // --- dispatch ------------------------------------------------------------
 
     self.addEventListener('fetch', (event) => {
@@ -164,6 +238,16 @@ if (IS_SERVICE_WORKER) {
         }
         if (data.kind === 'library-changed') {
             event.waitUntil(self.PS_NOTIFY.libraryChanged());
+            return;
+        }
+        if (data.kind === 'precache') {
+            // waitUntil keeps the worker alive for the duration of this slice.
+            event.waitUntil(precacheAppShell());
+            return;
+        }
+        if (data.kind === 'precache-status') {
+            event.waitUntil(precacheStatus().then((status) =>
+                event.source.postMessage({ __phantom: true, kind: 'precache-status', status })));
         }
     });
 }
