@@ -4,7 +4,7 @@
  * with tools/probe-requests.js rather than read out of jellyfin-web, so the set
  * is what the home, browse and series/season screens actually ask for.
  *
- * Scope for v0 is those screens. Search, filtering, genres, studios and
+ * Scope for v0 is those screens plus search. Filtering, genres, studios and
  * collections deliberately answer with well-formed empties: an empty result
  * renders, an error does not.
  */
@@ -69,6 +69,71 @@
         };
     }
 
+    // --- search -----------------------------------------------------------
+
+    /**
+     * Match and rank by name.
+     *
+     * Deliberately not the server's search: there is no index here and no
+     * inverted lookup, and a held library is small enough that walking it is
+     * cheaper than anything cleverer would be to maintain. Ranking is by where
+     * the match falls, so typing a title's first word puts that title first
+     * rather than burying it among episodes that merely mention it.
+     */
+    function rankSearch(dtos, term) {
+        const needle = term.toLowerCase();
+        const scored = [];
+        for (const dto of dtos) {
+            const name = (dto.Name || '').toLowerCase();
+            const series = (dto.SeriesName || '').toLowerCase();
+            let score;
+            if (name === needle) score = 0;
+            else if (name.startsWith(needle)) score = 1;
+            else if (new RegExp('\\b' + needle.replace(/[.*+?^$()[\]{}|\\]/g, '\\$&')).test(name)) score = 2;
+            else if (name.includes(needle)) score = 3;
+            else if (series.includes(needle)) score = 4;
+            else continue;
+            scored.push({ dto, score });
+        }
+        // Sort applies afterwards, so hold the rank on the item and let a caller
+        // that asked for an explicit order still get one.
+        scored.sort((a, b) => a.score - b.score || (a.dto.Name || '').localeCompare(b.dto.Name || ''));
+        return scored.map((e) => e.dto);
+    }
+
+    /**
+     * The type-ahead list. A hint is a thinner shape than an item, and the search
+     * screen draws it before it asks for anything else.
+     */
+    async function searchHints(ctx) {
+        const term = (ctx.params.get('searchTerm') || '').trim();
+        if (!term) return json({ SearchHints: [], TotalRecordCount: 0 });
+
+        const { rows, udMap } = await loadAll();
+        const types = ctx.params.list('includeItemTypes').map((t) => t.toLowerCase());
+        let dtos = rows.map((r) => present(r, udMap));
+        if (types.length) dtos = dtos.filter((d) => types.includes(String(d.Type).toLowerCase()));
+
+        const matched = rankSearch(dtos, term).slice(0, ctx.params.int('limit', 20));
+        return json({
+            SearchHints: matched.map((d) => ({
+                ItemId: d.Id,
+                Id: d.Id,
+                Name: d.Name,
+                Type: d.Type,
+                ProductionYear: d.ProductionYear,
+                RunTimeTicks: d.RunTimeTicks,
+                MediaType: d.MediaType,
+                Series: d.SeriesName,
+                IndexNumber: d.IndexNumber,
+                ParentIndexNumber: d.ParentIndexNumber,
+                PrimaryImageTag: d.ImageTags && d.ImageTags.Primary,
+                IsFolder: !!d.IsFolder
+            })),
+            TotalRecordCount: matched.length
+        });
+    }
+
     // --- sorting ----------------------------------------------------------
 
     const SORTERS = {
@@ -113,10 +178,7 @@
     async function queryItems(p) {
         const { rows, udMap } = await loadAll();
 
-        // Search is out of scope for v0 and an empty result is the honest answer:
-        // pretending to search a library we only partly hold would be worse.
-        if (p.get('searchTerm')) return { items: [], total: 0, start: 0 };
-
+        const searchTerm = (p.get('searchTerm') || '').trim();
         const types = p.list('includeItemTypes').map((t) => t.toLowerCase());
         const excludeTypes = p.list('excludeItemTypes').map((t) => t.toLowerCase());
         const parentId = p.get('parentId') || p.get('ParentId');
@@ -149,10 +211,13 @@
                     ? rows.filter((r) => ancestorOf(r).includes(parentId))
                     : rows.filter((r) => parentKeyOf(r.dto) === parentId);
             }
-        } else if (types.length) {
+        } else if (types.length || searchTerm) {
+            // A search with no type filter looks at everything: an episode nobody
+            // can reach from the top level is exactly what someone searching for it
+            // is trying to find.
             candidates = rows;
         } else {
-            // No parent and no type filter: only ever return top-level items, or a
+            // No parent, no type filter and no search: only top-level items, or a
             // library of series answers with every episode in it.
             candidates = rows.filter((r) => r.dto.Type === 'Movie' || r.dto.Type === 'Series');
         }
@@ -162,6 +227,8 @@
 
         let dtos = candidates.map((r) => present(r, udMap));
 
+        if (searchTerm) dtos = rankSearch(dtos, searchTerm);
+
         const filters = p.list('filters').map((f) => f.toLowerCase());
         if (filters.includes('isplayed')) dtos = dtos.filter((d) => d.UserData && d.UserData.Played);
         if (filters.includes('isunplayed')) dtos = dtos.filter((d) => !(d.UserData && d.UserData.Played));
@@ -169,7 +236,9 @@
 
         const sortBy = p.list('sortBy');
         const descending = String(p.get('sortOrder', 'Ascending')).toLowerCase() === 'descending';
-        sortItems(dtos, sortBy, descending);
+        // rankSearch already ordered these by relevance. Sorting again would replace
+        // that with the default alphabetical order and bury the best match.
+        if (!searchTerm || sortBy.length) sortItems(dtos, sortBy, descending);
 
         const total = dtos.length;
         const start = p.int('startIndex', 0);
@@ -324,6 +393,7 @@
     g.PS_LIBRARY = {
         loadAll, present, parentKeyOf, queryItems, viewDto,
         userViews, items, itemById, latest, resume, nextUp, seasons, episodes, ancestors, image,
+        searchHints, rankSearch,
         emptyList
     };
 })(self);

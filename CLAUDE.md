@@ -82,6 +82,14 @@ HEADFUL=1 ... node tools/smoke.js   # to watch it
   awaited before the renderer starts, so a 404 there means an ASS track silently
   never appears.
 
+- **`navigator.storage.estimate()` does not report a real quota.** Chromium
+  answers roughly what you are using plus a constant, to make it useless for
+  fingerprinting, so a "GB available" reading moves as you download and says
+  nothing about the disk. The settings page shows used space and no percentage.
+- **A `fetch()` from inside the worker is a real network request** and is not
+  intercepted by that worker. Anything the worker reads to serve a response has to
+  fall back to the cache, or it becomes the one page that fails offline.
+
 ## The schema is shaped for features that do not exist yet
 
 `overlay/ps/schema.js` is the single definition, loaded in both the worker and the

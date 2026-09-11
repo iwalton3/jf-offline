@@ -138,6 +138,27 @@ function subtitleFormat(codec) {
     return (c === 'ass' || c === 'ssa') ? c : 'vtt';
 }
 
+/**
+ * Audio tracks, and whether a choice has to be made about them.
+ *
+ * A dual-audio file carries both, but a browser will only ever play the one the
+ * container defaults to: Chrome does not expose the audioTracks API, so there is
+ * no way to switch after the fact. Picking a different track therefore means
+ * transcoding with that track selected, which is a decision for sync time.
+ */
+export function audioOptions(mediaSource) {
+    const streams = (mediaSource.MediaStreams || []).filter((st) => st.Type === 'Audio');
+    return streams.map((st) => ({
+        index: st.Index,
+        language: st.Language || 'und',
+        title: st.DisplayTitle || st.Title || st.Language || ('Track ' + st.Index),
+        codec: st.Codec,
+        channels: st.Channels,
+        isDefault: !!st.IsDefault,
+        isContainerDefault: st.Index === mediaSource.DefaultAudioStreamIndex
+    }));
+}
+
 async function downloadSubtitles(server, dto, mediaSource, tracks) {
     const held = [];
     for (const track of tracks) {
@@ -362,10 +383,18 @@ export async function downloadItem(server, reactiveDto, options = {}) {
     if (!mediaSource) throw new Error('server offered no media source');
 
     const tracks = subtitleOptions(mediaSource);
+    const audio = audioOptions(mediaSource);
     const burning = subtitle.mode === S().SUBTITLE_MODE.BURN && subtitle.index != null;
 
+    // A chosen audio track that is not the container's own default can only be
+    // delivered by transcoding: the file holds every track, and the browser plays
+    // whichever the container says, with no way to switch.
+    const chosenAudio = options.audioStreamIndex != null ? Number(options.audioStreamIndex) : null;
+    const audioNeedsTranscode = chosenAudio != null
+        && !audio.some((a) => a.index === chosenAudio && a.isContainerDefault);
+
     // Burning is a picture operation, so it can only happen during a transcode.
-    const canDirect = !burning
+    const canDirect = !burning && !audioNeedsTranscode
         && (mediaSource.SupportsDirectPlay || mediaSource.SupportsDirectStream)
         && directPlayable(mediaSource.Container);
     const mode = canDirect ? S().DOWNLOAD_MODE.DIRECT : S().DOWNLOAD_MODE.HLS;
@@ -387,6 +416,10 @@ export async function downloadItem(server, reactiveDto, options = {}) {
         runtimeTicks: dto.RunTimeTicks || mediaSource.RunTimeTicks || 0,
         mediaStreams: mediaSource.MediaStreams || [],
         defaultAudioStreamIndex: mediaSource.DefaultAudioStreamIndex != null ? mediaSource.DefaultAudioStreamIndex : null,
+        defaultSubtitleStreamIndex: mediaSource.DefaultSubtitleStreamIndex != null
+            ? mediaSource.DefaultSubtitleStreamIndex
+            : null,
+        audioStreamIndex: chosenAudio,
         bitrate: mediaSource.Bitrate || 0,
         subtitleMode: subtitle.mode,
         burnedSubtitleIndex: burning ? subtitle.index : null,
@@ -406,9 +439,13 @@ export async function downloadItem(server, reactiveDto, options = {}) {
     await DB().put('downloads', row);
 
     try {
-        const burnParams = burning
-            ? { SubtitleStreamIndex: subtitle.index, SubtitleMethod: 'Encode' }
-            : null;
+        const transcodeParams = {};
+        if (burning) {
+            transcodeParams.SubtitleStreamIndex = subtitle.index;
+            transcodeParams.SubtitleMethod = 'Encode';
+        }
+        if (chosenAudio != null) transcodeParams.AudioStreamIndex = chosenAudio;
+        const extraParams = Object.keys(transcodeParams).length ? transcodeParams : null;
 
         const result = mode === S().DOWNLOAD_MODE.DIRECT
             ? await downloadDirect(server, dto, mediaSource, row, (done, total) => {
@@ -416,7 +453,7 @@ export async function downloadItem(server, reactiveDto, options = {}) {
             })
             : await downloadHls(server, dto, mediaSource, row, (done, total) => {
                 onProgress(done, total, 'segments');
-            }, burnParams);
+            }, extraParams);
 
         // Sidecars only make sense when nothing was burned in: a burned track is
         // in the picture, and offering it again as a switchable overlay would
@@ -460,8 +497,12 @@ export async function inspectSubtitles(server, reactiveDto) {
     const dto = plain(reactiveDto);
     const info = await server.playbackInfo(dto.Id);
     const mediaSource = pickMediaSource(info.MediaSources || []);
-    if (!mediaSource) return { tracks: [], container: null };
-    return { tracks: subtitleOptions(mediaSource), container: mediaSource.Container };
+    if (!mediaSource) return { tracks: [], audio: [], container: null };
+    return {
+        tracks: subtitleOptions(mediaSource),
+        audio: audioOptions(mediaSource),
+        container: mediaSource.Container
+    };
 }
 
 /**
@@ -490,7 +531,10 @@ export async function downloadSeries(server, reactiveSeriesDto, options = {}) {
     for (let i = 0; i < list.length; i++) {
         onProgress(i, list.length, 'episodes', list[i].Name);
         try {
-            await downloadItem(server, list[i], { subtitle: options.subtitle });
+            await downloadItem(server, list[i], {
+                subtitle: options.subtitle,
+                audioStreamIndex: options.audioStreamIndex
+            });
         } catch (err) {
             // One unplayable episode should not abandon the rest of the series.
             failures.push({ name: list[i].Name, error: String(err.message || err) });

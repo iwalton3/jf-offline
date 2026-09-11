@@ -22,6 +22,10 @@ const SUBTITLE_ITEM = process.env.JF_SUBTITLE_ITEM || '585d3907f46356aceeecff57c
 const BURN_ITEM = process.env.JF_BURN_ITEM || 'b7e1d10a787bf92cbb75f4ffef2a8197';
 // A styled ASS track with the font it was authored against embedded alongside.
 const ASS_ITEM = process.env.JF_ASS_ITEM || 'c481c35858cfe4b4ec22187d8c96dc92';
+// Six audio tracks, container default index 1.
+const MULTI_AUDIO_ITEM = process.env.JF_AUDIO_ITEM || 'c72448f6b10acfae9edd95c2b1d06775';
+// One subtitle track, flagged forced.
+const FORCED_SUB_ITEM = process.env.JF_FORCED_ITEM || '7eda0c4da7bb755f0e6ef4f6e84caad8';
 const HEADFUL = !!process.env.HEADFUL;
 
 const results = [];
@@ -527,6 +531,107 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     check('the encoding config answers, so libass actually starts',
         ass.fallbackFont === false, String(ass.fallbackFont));
 
+    // A file with several audio tracks. The browser plays whichever the container
+    // defaults to and cannot switch, so picking another has to force a transcode.
+    const dualAudio = await page.evaluate(async (pid, id) => {
+        const { knownServers, SourceServer } = await import('/web/plugin/source.js');
+        const { downloadItem, inspectSubtitles } = await import('/web/plugin/downloader.js');
+        const server = new SourceServer(knownServers(pid)[0]);
+        const item = await server.item(id);
+        const { audio } = await inspectSubtitles(server, item);
+        const alternate = audio.find((a) => !a.isContainerDefault);
+        if (!alternate) return { error: 'fixture has only one audio track' };
+
+        const row = await downloadItem(server, item, { audioStreamIndex: alternate.index });
+        const info = await (await fetch(`/Items/${id}/PlaybackInfo`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+        })).json();
+        return {
+            tracks: audio.length,
+            chosen: alternate.index,
+            containerDefault: (audio.find((a) => a.isContainerDefault) || {}).index,
+            mode: row.mode,
+            state: row.state,
+            recorded: row.audioStreamIndex,
+            reported: info.MediaSources[0].DefaultAudioStreamIndex
+        };
+    }, phantomId, MULTI_AUDIO_ITEM);
+
+    check('a multi-audio file offers every track', !dualAudio.error && dualAudio.tracks > 1,
+        dualAudio.error || `${dualAudio.tracks} tracks, container default ${dualAudio.containerDefault}`);
+    check('choosing a non-default audio track forces a transcode',
+        dualAudio.mode === 'hls' && dualAudio.state === 'complete',
+        `${dualAudio.mode}, ${dualAudio.state}`);
+    check('the chosen audio track is what plays',
+        dualAudio.recorded === dualAudio.chosen && dualAudio.reported === dualAudio.chosen,
+        `chose ${dualAudio.chosen}, reported ${dualAudio.reported}`);
+
+    // Default subtitle selection has to survive the trip, and must never name a
+    // track we did not keep.
+    const defaults = await page.evaluate(async (pid, forcedId, manyId) => {
+        const { knownServers, SourceServer } = await import('/web/plugin/source.js');
+        const { downloadItem } = await import('/web/plugin/downloader.js');
+        const server = new SourceServer(knownServers(pid)[0]);
+        const read = async (id) => {
+            const item = await server.item(id);
+            const row = await downloadItem(server, item, {});
+            const info = await (await fetch(`/Items/${id}/PlaybackInfo`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+            })).json();
+            const ms = info.MediaSources[0];
+            const subs = (ms.MediaStreams || []).filter((st) => st.Type === 'Subtitle');
+            return {
+                held: row.subtitles.map((sub) => sub.index),
+                sourceDefault: row.defaultSubtitleStreamIndex,
+                reported: ms.DefaultSubtitleStreamIndex,
+                forcedIndex: (subs.find((st) => st.IsForced) || {}).Index
+            };
+        };
+        return { forced: await read(forcedId), many: await read(manyId) };
+    }, phantomId, FORCED_SUB_ITEM, SUBTITLE_ITEM);
+
+    // The server's own choice, not ours. Measured on this fixture it picks the
+    // default-flagged track over the forced one, and second-guessing that would be
+    // inventing a subtitle policy we have no information to run.
+    check('the source server\'s default subtitle is the one selected',
+        defaults.forced.sourceDefault != null
+            && defaults.forced.reported === defaults.forced.sourceDefault,
+        `source said ${defaults.forced.sourceDefault}, reported ${defaults.forced.reported}`);
+    check('the default subtitle never names a track we did not keep',
+        defaults.many.reported === null || defaults.many.held.includes(defaults.many.reported),
+        `reported ${defaults.many.reported} of held [${defaults.many.held.join(',')}]`);
+
+    // ---- 6d. searching the held library ----------------------------------
+
+    const search = await page.evaluate(async () => {
+        const uid = window.ApiClient.getCurrentUserId();
+        const get = async (u) => (await (await fetch(u)).json());
+        const all = await get(`/Items?userId=${uid}&Recursive=true`);
+        const sample = all.Items[0];
+        const word = (sample.Name || '').split(' ')[0];
+
+        const byName = await get(`/Items?userId=${uid}&Recursive=true&searchTerm=${encodeURIComponent(word)}`);
+        const nonsense = await get(`/Items?userId=${uid}&Recursive=true&searchTerm=zzzznotathing`);
+        const hints = await get(`/Search/Hints?userId=${uid}&searchTerm=${encodeURIComponent(word)}&limit=10`);
+        const exact = await get(`/Items?userId=${uid}&Recursive=true&searchTerm=${encodeURIComponent(sample.Name)}`);
+
+        return {
+            word,
+            matched: byName.TotalRecordCount,
+            hits: byName.Items.map((i) => i.Name),
+            empty: nonsense.TotalRecordCount,
+            hintCount: hints.SearchHints.length,
+            hintShape: hints.SearchHints[0] ? Object.keys(hints.SearchHints[0]).includes('ItemId') : false,
+            bestFirst: exact.Items[0] && exact.Items[0].Name === sample.Name
+        };
+    });
+    check('the held library answers a search', search.matched > 0,
+        `"${search.word}" matched ${search.matched}`);
+    check('a search that matches nothing returns nothing', search.empty === 0);
+    check('search hints answer in their own shape', search.hintCount > 0 && search.hintShape,
+        `${search.hintCount} hints`);
+    check('an exact title ranks first', search.bestFirst === true);
+
     // ---- 6c. the offline app shell ---------------------------------------
 
     const manifest = await page.evaluate(async () => {
@@ -672,7 +777,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
     check('the settings page reports a library\'s full size',
         !uiPaging.error && uiPaging.total > 0, uiPaging.error || `${uiPaging.library}: ${uiPaging.total}`);
-    check('Load more fetches past the first page',
+    check('the list pages past the first page as it scrolls',
         !uiPaging.error && (uiPaging.total <= uiPaging.afterFirst || uiPaging.afterSecond > uiPaging.afterFirst),
         uiPaging.error || `${uiPaging.afterFirst} then ${uiPaging.afterSecond} of ${uiPaging.total}`);
     check('paged items are not duplicated',
@@ -710,6 +815,20 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     check('the app boots with no network', offline.boot === true, offline.error);
     check('the phantom server answers with no network',
         offline.server === 'Offline Library' && offline.total >= 1, `${offline.server} · ${offline.total} items`);
+
+    const offlinePlugin = await page.evaluate(async () => {
+        const htmlRes = await fetch('/web/configurationpage?name=offlinesync');
+        const jsRes = await fetch('/web/configurationpage?name=offlinesync.js');
+        const js = await jsRes.text();
+        return {
+            htmlStatus: htmlRes.status,
+            jsStatus: jsRes.status,
+            isModule: js.includes('export default')
+        };
+    });
+    check('the download manager still loads with no network',
+        offlinePlugin.htmlStatus === 200 && offlinePlugin.jsStatus === 200 && offlinePlugin.isModule,
+        `html ${offlinePlugin.htmlStatus}, controller ${offlinePlugin.jsStatus}`);
 
     const offlineMedia = await page.evaluate(async (id) => {
         const info = await (await fetch(`/Items/${id}/PlaybackInfo`, {

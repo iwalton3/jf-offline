@@ -37,6 +37,18 @@
         PluginId: PLUGIN_ID
     };
 
+    /** Network first so edits land, cache second so being offline is not fatal. */
+    async function readOverlayFile(path) {
+        try {
+            const res = await fetch(path, { cache: 'no-store' });
+            if (res.ok) return res.text();
+        } catch {
+            // offline; fall through
+        }
+        const cached = await caches.match(path);
+        return cached ? cached.text() : null;
+    }
+
     const plugins = () => json([PLUGIN_INFO]);
 
     const configurationPages = () => json([PAGE_INFO]);
@@ -65,11 +77,15 @@
         }
         if (name === PAGE_NAME + '.js') {
             // The controller is an ES module imported by the app. It is a real file
-            // on the overlay; fetching it through the worker's own origin keeps
-            // exactly one copy of it.
-            const res = await fetch('/web/plugin/controller.js', { cache: 'no-store' });
-            if (!res.ok) return notFound('controller');
-            return text(await res.text(), 'text/javascript; charset=utf-8');
+            // on the overlay; reading it here keeps exactly one copy of it.
+            //
+            // A fetch() issued from inside a worker is a real network request and is
+            // NOT intercepted by this worker, so a plain fetch made the download
+            // manager the one page that did not work offline. The cache is the same
+            // one the app shell precache fills, so the fallback always has it.
+            const body = await readOverlayFile('/web/plugin/controller.js');
+            if (body == null) return notFound('controller');
+            return text(body, 'text/javascript; charset=utf-8');
         }
         return notFound('configuration page ' + name);
     }

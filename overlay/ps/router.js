@@ -250,7 +250,7 @@
 
         // In scope but deliberately empty for v0.
         ['GET', /^\/(studios|genres|persons|musicgenres|artists|artists\/albumartists)$/, () => emptyList()],
-        ['GET', /^\/search\/hints$/, () => json({ SearchHints: [], TotalRecordCount: 0 })],
+        ['GET', /^\/search\/hints$/, LIB.searchHints],
         ['GET', /^\/movies\/recommendations$/, () => json([])],
         ['GET', /^\/livetv\/programs(\/recommended)?$/, () => emptyList()],
         ['GET', /^\/livetv\/.*$/, () => emptyList()],

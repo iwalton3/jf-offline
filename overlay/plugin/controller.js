@@ -22,8 +22,8 @@ import {
     ensurePersistentStorage, inspectSubtitles
 } from '/web/plugin/downloader.js';
 
-// One request per press of Load more, and per automatic top-up when the list is
-// scrolled near its end.
+// One request per automatic top-up, which happens when the list is
+// scrolled near its end. There is no Load more button: the list is windowed.
 const PAGE = 100;
 const ROW_HEIGHT = 52;
 const LIST_HEIGHT = 420;
@@ -58,7 +58,12 @@ class OfflineSyncManager extends Component {
         // The subtitle question, asked about one item at a time.
         asking: null,
         askTracks: [],
-        askChoice: 'auto'
+        askAudio: [],
+        askChoice: 'auto',
+        askAudioChoice: '',
+        // Type-to-filter for each list.
+        itemFilter: '',
+        heldFilter: ''
     };
 
     static styles = /*css*/`
@@ -123,6 +128,9 @@ class OfflineSyncManager extends Component {
             box-sizing: border-box;
         }
         .item:last-child { border-bottom: none; }
+        /* The name takes the slack and truncates; min-width:0 is what lets a flex
+           child shrink below its content, without which the button is pushed off
+           the right edge on a phone instead of the text being clipped. */
         .name {
             flex: 1 1 auto; min-width: 0;
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -133,6 +141,31 @@ class OfflineSyncManager extends Component {
             text-transform: uppercase; letter-spacing: .06em;
         }
         .tag.held { color: var(--primary-color); }
+        /* Always hard against the right edge, whatever survives to its left. */
+        .item > button.act { margin-left: auto; }
+
+        /* On a phone the tags are the first thing worth losing: the name and the
+           button are what the row is for. */
+        @media (max-width: 640px) {
+            .item { gap: .5em; padding: 0 .6em; }
+            .item .tag { display: none; }
+            .item .tag.keep { display: inline; }
+            button.act { min-width: 0; padding: .35em .7em; }
+        }
+
+        input.filter {
+            background: var(--input-bg);
+            border: 1px solid var(--input-border);
+            color: var(--input-text);
+            border-radius: 3px;
+            padding: .45em .7em;
+            font: inherit; font-size: 13px;
+            width: 100%; box-sizing: border-box;
+        }
+        input.filter:focus { outline: none; border-color: var(--primary-color); }
+        .listhead { display: flex; gap: .75em; align-items: center; margin-bottom: .5em; }
+        .listhead h3 { margin: 0; flex: none; }
+        .listhead .grow { flex: 1 1 auto; min-width: 8em; }
 
         button.act {
             flex: none;
@@ -248,6 +281,7 @@ class OfflineSyncManager extends Component {
             const res = await this.server().items({
                 ParentId: view.Id,
                 IncludeItemTypes: view.CollectionType === 'movies' ? 'Movie' : 'Series',
+                SearchTerm: this.state.itemFilter || undefined,
                 StartIndex: startIndex,
                 Limit: PAGE
             });
@@ -262,8 +296,35 @@ class OfflineSyncManager extends Component {
         this.state.loadingItems = false;
     }
 
-    loadMore() {
-        this.loadItems(true);
+    /**
+     * Filter the source library.
+     *
+     * Sent to the source server rather than applied to what is loaded, because a
+     * filter that only searched the first hundred of a thousand would answer
+     * "nothing" for most of the library and look broken.
+     */
+    onItemFilter(ev) {
+        this.state.itemFilter = ev.target.value;
+        clearTimeout(this._filterTimer);
+        // Typing is faster than the round trip; without this every keystroke is a
+        // request and the answers arrive out of order.
+        this._filterTimer = setTimeout(() => {
+            this.state.items = [];
+            this.state.itemsTotal = 0;
+            this.loadItems();
+        }, 250);
+    }
+
+    /** The held list is small and already in memory, so this one is local. */
+    onHeldFilter(ev) {
+        this.state.heldFilter = ev.target.value;
+    }
+
+    get filteredDownloads() {
+        const needle = this.state.heldFilter.trim().toLowerCase();
+        if (!needle) return this.state.downloads;
+        return this.state.downloads.filter((row) =>
+            String(row.name || row.itemId).toLowerCase().includes(needle));
     }
 
     /** Top up before the list runs out, so scrolling never stops at a boundary. */
@@ -312,13 +373,22 @@ class OfflineSyncManager extends Component {
                 : item;
             if (!sample) throw new Error('series has no episodes');
 
-            const { tracks } = await inspectSubtitles(server, sample);
-            if (!tracks.some((t) => !t.canExtract)) {
-                await this.run(item, { mode: 'auto' });
+            const { tracks, audio } = await inspectSubtitles(server, sample);
+            const needsSubtitleChoice = tracks.some((t) => !t.canExtract);
+            // More than one audio track is a question too: the browser plays
+            // whichever the container defaults to and cannot switch, so picking
+            // another one has to happen now or not at all.
+            const needsAudioChoice = audio.length > 1;
+
+            if (!needsSubtitleChoice && !needsAudioChoice) {
+                await this.run(item, { mode: 'auto' }, null);
                 return;
             }
-            this.state.askTracks = tracks;
+            this.state.askTracks = needsSubtitleChoice ? tracks : [];
+            this.state.askAudio = needsAudioChoice ? audio : [];
             this.state.askChoice = 'auto';
+            const preferred = audio.find((a) => a.isContainerDefault) || audio[0];
+            this.state.askAudioChoice = preferred ? String(preferred.index) : '';
             this.state.asking = item;
         });
     }
@@ -326,11 +396,23 @@ class OfflineSyncManager extends Component {
     confirmAsk() {
         const item = this.state.asking;
         const choice = this.state.askChoice;
+        const audioChoice = this.state.askAudioChoice;
         this.state.asking = null;
         const subtitle = choice === 'auto' || choice === 'none'
             ? { mode: choice }
             : { mode: 'burn', index: Number(choice) };
-        this.run(item, subtitle);
+        this.run(item, subtitle, audioChoice === '' ? null : Number(audioChoice));
+    }
+
+    onAskAudioChange(ev) {
+        this.state.askAudioChoice = ev.detail ? String(ev.detail.value) : ev.target.value;
+    }
+
+    get askAudioOptions() {
+        return this.state.askAudio.map((a) => ({
+            label: `${a.title}${a.channels ? ' · ' + a.channels + 'ch' : ''}${a.isContainerDefault ? ' (default)' : ''}`,
+            value: String(a.index)
+        }));
     }
 
     cancelAsk() {
@@ -343,7 +425,7 @@ class OfflineSyncManager extends Component {
 
     // --- downloading ------------------------------------------------------
 
-    run(item, subtitle) {
+    run(item, subtitle, audioStreamIndex) {
         const server = this.server();
         // Asked on the gesture, because Firefox only grants persistence while
         // handling one. Without it the browser may evict the whole library.
@@ -359,13 +441,13 @@ class OfflineSyncManager extends Component {
             };
 
             if (item.Type === 'Series') {
-                const result = await downloadSeries(server, item, { subtitle, onProgress });
+                const result = await downloadSeries(server, item, { subtitle, audioStreamIndex, onProgress });
                 if (result.failures.length) {
                     this.state.error = `${result.failures.length} of ${result.episodes} episodes failed: `
                         + result.failures.map((f) => f.name).join(', ');
                 }
             } else {
-                await downloadItem(server, item, { subtitle, onProgress });
+                await downloadItem(server, item, { subtitle, audioStreamIndex, onProgress });
             }
             await this.refreshDownloads();
             await window.__phantom.libraryChanged();
@@ -420,6 +502,24 @@ class OfflineSyncManager extends Component {
         `;
     }
 
+    renderDownload(row) {
+        return html`
+            <div class="item">
+                <span class="name">${row.name || row.itemId}</span>
+                <span class="tag">${row.mode} · ${fmtBytes(row.bytesDone)}</span>
+                ${when(!!(row.subtitles && row.subtitles.length), () => html`
+                    <span class="tag">${row.subtitles.length} subs</span>
+                `)}
+                ${when(row.burnedSubtitleIndex != null, () => html`
+                    <span class="tag held">burned in</span>
+                `)}
+                <span class="tag keep">${row.state}</span>
+                <button class="act" disabled="${this.state.busy}"
+                    on-click="${() => this.removeHeld(row)}">Remove</button>
+            </div>
+        `;
+    }
+
     renderSkeletons() {
         const widths = ['42%', '61%', '35%', '54%', '48%', '66%', '39%', '57%'];
         return html`
@@ -451,13 +551,15 @@ class OfflineSyncManager extends Component {
     }
 
     renderStorage() {
-        const { usage, quota } = this.state.storage;
-        const pct = quota ? Math.min(100, (usage / quota) * 100) : 0;
+        // Used only, no percentage and no bar. Chromium does not report a real
+        // quota: it answers with roughly what you are using plus a constant, so a
+        // "13.4 GB available" reading moves as you download and says nothing about
+        // the disk. A number we cannot stand behind is worse than no number.
+        const { usage } = this.state.storage;
         return html`
             <div>
                 <h3>Storage</h3>
-                <p class="note">Using ${fmtBytes(usage)} of ${fmtBytes(quota)} available to this site</p>
-                <div class="bar" style="margin-top:.4em"><span style="width:${pct.toFixed(1)}%"></span></div>
+                <p class="note">Downloads are using ${fmtBytes(usage)}.</p>
                 <div class="statusline" style="margin-top:.5em">
                     ${when(this.state.persisted, () => html`
                         <span class="note good">Storage is persistent. Downloads stay until you remove them.</span>
@@ -512,19 +614,40 @@ class OfflineSyncManager extends Component {
 
                 ${when(!!s.asking, () => html`
                     <div class="ask">
-                        <h3>Subtitles for ${s.asking.Name}</h3>
-                        <p class="note">
-                            This item has picture-based subtitles. They carry no text to extract,
-                            so the only way to see them offline is to burn one track into the
-                            video. That means transcoding, and it fixes the choice for good.
-                        </p>
-                        <div class="field">
-                            <label for="osx-subs">Subtitles</label>
-                            <cl-dropdown id="osx-subs"
-                                options="${this.askOptions}"
-                                value="${s.askChoice}"
-                                on-change="${(ev) => this.onAskChange(ev)}"></cl-dropdown>
-                        </div>
+                        <h3>Before downloading ${s.asking.Name}</h3>
+                        ${when(s.askTracks.length > 0, () => html`
+                            <p class="note">
+                                This item has picture-based subtitles. They carry no text to
+                                extract, so the only way to see them offline is to burn one track
+                                into the video. That means transcoding, and it fixes the choice
+                                for good.
+                            </p>
+                        `)}
+                        ${when(s.askAudio.length > 0, () => html`
+                            <p class="note">
+                                This item has more than one audio track. A browser plays whichever
+                                the file itself defaults to and cannot switch, so choosing another
+                                one means transcoding, and it also fixes that choice for good.
+                            </p>
+                        `)}
+                        ${when(s.askTracks.length > 0, () => html`
+                            <div class="field">
+                                <label for="osx-subs">Subtitles</label>
+                                <cl-dropdown id="osx-subs"
+                                    options="${this.askOptions}"
+                                    value="${s.askChoice}"
+                                    on-change="${(ev) => this.onAskChange(ev)}"></cl-dropdown>
+                            </div>
+                        `)}
+                        ${when(s.askAudio.length > 0, () => html`
+                            <div class="field">
+                                <label for="osx-audio">Audio</label>
+                                <cl-dropdown id="osx-audio"
+                                    options="${this.askAudioOptions}"
+                                    value="${s.askAudioChoice}"
+                                    on-change="${(ev) => this.onAskAudioChange(ev)}"></cl-dropdown>
+                            </div>
+                        `)}
                         <div class="row">
                             <button class="act primary" on-click="${() => this.confirmAsk()}">Download</button>
                             <button class="act" on-click="${() => this.cancelAsk()}">Cancel</button>
@@ -534,7 +657,15 @@ class OfflineSyncManager extends Component {
 
                 ${when(!!s.viewId, () => html`
                     <div>
-                        <h3>Available to download</h3>
+                        <div class="listhead">
+                            <h3>Available to download</h3>
+                            <span class="grow">
+                                <input class="filter" type="search" id="osx-item-filter"
+                                    placeholder="Type to filter this library"
+                                    value="${s.itemFilter}"
+                                    on-input="${(ev) => this.onItemFilter(ev)}">
+                            </span>
+                        </div>
                         <div class="panel scroller" on-scroll="${(ev) => this.onListScroll(ev)}">
                             ${when(!s.items.length, () => this.renderSkeletons())}
                             ${when(s.items.length > 0, () => html`
@@ -546,36 +677,34 @@ class OfflineSyncManager extends Component {
                                     keyFn="${(item) => item.Id}"></cl-virtual-list>
                             `)}
                         </div>
-                        <div class="row" style="margin-top:.6em; align-items:center">
+                        <div class="statusline" style="margin-top:.5em">
                             <span class="note">Showing ${s.items.length} of ${s.itemsTotal}</span>
-                            ${when(s.items.length < s.itemsTotal, () => html`
-                                <button class="act" disabled="${s.busy || s.loadingItems}"
-                                    on-click="${() => this.loadMore()}">Load more</button>
-                            `)}
                         </div>
                     </div>
                 `)}
 
                 <div>
-                    <h3>Downloaded</h3>
+                    <div class="listhead">
+                        <h3>Downloaded</h3>
+                        ${when(s.downloads.length > 4, () => html`
+                            <span class="grow">
+                                <input class="filter" type="search" id="osx-held-filter"
+                                    placeholder="Type to find a download"
+                                    value="${s.heldFilter}"
+                                    on-input="${(ev) => this.onHeldFilter(ev)}">
+                            </span>
+                        `)}
+                    </div>
                     ${when(!s.downloads.length, () => html`<p class="note">Nothing downloaded yet.</p>`)}
                     ${when(s.downloads.length > 0, () => html`
-                        <div class="panel" style="max-height:${LIST_HEIGHT}px; overflow-y:auto">
-                            ${each(s.downloads, (row) => html`
-                                <div class="item">
-                                    <span class="name">${row.name || row.itemId}</span>
-                                    <span class="tag">${row.mode} · ${fmtBytes(row.bytesDone)}</span>
-                                    ${when(!!(row.subtitles && row.subtitles.length), () => html`
-                                        <span class="tag">${row.subtitles.length} subs</span>
-                                    `)}
-                                    ${when(row.burnedSubtitleIndex != null, () => html`
-                                        <span class="tag held">burned in</span>
-                                    `)}
-                                    <span class="tag">${row.state}</span>
-                                    <button class="act" disabled="${s.busy}"
-                                        on-click="${() => this.removeHeld(row)}">Remove</button>
-                                </div>
-                            `, (row) => row.srv + row.itemId + row.sourceId)}
+                        <div class="panel scroller">
+                            <cl-virtual-list
+                                items="${this.filteredDownloads}"
+                                itemHeight="${ROW_HEIGHT}"
+                                scrollContainer="parent"
+                                emptyMessage="Nothing matches that."
+                                renderItem="${(row) => this.renderDownload(row)}"
+                                keyFn="${(row) => row.srv + row.itemId + row.sourceId}"></cl-virtual-list>
                         </div>
                     `)}
                 </div>

@@ -21,7 +21,14 @@
   forces a transcode and fixes the choice for good, and is therefore a decision
   only the person downloading can make.
 - **The whole web client held offline**, so airplane mode reaches routes that were
-  never visited.
+  never visited, the download manager included.
+- **Search** over the held library, ranked by where the match falls, plus the
+  type-ahead hints the search screen draws first.
+- **Dual audio.** A browser plays whichever track the container defaults to and
+  cannot switch, so the settings page asks at sync time; choosing another track
+  transcodes with it selected.
+- **Default track selection transfers**, taken from the source server rather than
+  guessed, and never naming a track that was not downloaded.
 
 ## Out, deliberately
 
@@ -37,6 +44,7 @@
 - **Resuming a partial download** across a reload. A failed write is discarded
   rather than left truncated, so a retry starts clean.
 - Music, books, photos, live TV.
+- Filtering by genre, year or rating. Search matches names only.
 - Chapter images.
 - Multiple versions of one item. The downloader picks the best single source.
 

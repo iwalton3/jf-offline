@@ -58,7 +58,9 @@
             MediaAttachments: [],
             Formats: [],
             RequiredHttpHeaders: {},
-            DefaultAudioStreamIndex: dl.defaultAudioStreamIndex != null ? dl.defaultAudioStreamIndex : null,
+            DefaultAudioStreamIndex: dl.audioStreamIndex != null
+                ? dl.audioStreamIndex
+                : (dl.defaultAudioStreamIndex != null ? dl.defaultAudioStreamIndex : null),
             DefaultSubtitleStreamIndex: null,
             Bitrate: dl.bitrate || 0
         };
@@ -89,6 +91,23 @@
         // Fonts an ASS track was authored against. libass reads these from
         // MediaAttachments; without them it substitutes and the typesetting is
         // wrong in ways that are obvious on anime and invisible on plain dialogue.
+        // Which track starts selected. The source server's own choice is preferred,
+        // but only if we kept that track: pointing at a track we did not download
+        // selects nothing and looks like subtitles being off when they are not.
+        const heldIndexes = new Set((dl.subtitles || []).map((sub) => sub.index));
+        if (dl.defaultSubtitleStreamIndex != null && heldIndexes.has(dl.defaultSubtitleStreamIndex)) {
+            base.DefaultSubtitleStreamIndex = dl.defaultSubtitleStreamIndex;
+        } else {
+            // Default before forced, which is the order the server itself uses:
+            // measured against a fixture holding both, Jellyfin selects the
+            // default-flagged track and leaves the forced one to be chosen by the
+            // audio-language rules we have no way to evaluate here.
+            const flagged = base.MediaStreams.find((st) => st.Type === 'Subtitle' && st.IsDefault);
+            const forced = base.MediaStreams.find((st) => st.Type === 'Subtitle' && st.IsForced);
+            const pick = flagged || forced;
+            base.DefaultSubtitleStreamIndex = pick ? pick.Index : null;
+        }
+
         base.MediaAttachments = (dl.attachments || []).map((att) => ({
             Codec: att.codec,
             Index: att.index,
