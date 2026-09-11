@@ -1,0 +1,96 @@
+<!doctype html>
+<!--
+  Dev page, not part of the app. Answers "does the phantom server work in THIS
+  browser" without jellyfin-web in the way, which is what you want when a browser
+  behaves differently and the app's own failure mode is a blank screen.
+
+  Open /web/diag.html. It prints one JSON blob to the page and to the console, so
+  it also works under `firefox --headless` with devtools.console.stdout.content.
+-->
+<meta charset="utf-8">
+<title>Phantom server diagnostic</title>
+<style>
+  body { font: 13px/1.5 ui-monospace, Menlo, monospace; margin: 0; padding: 16px; background: #111; color: #ddd; }
+  pre { white-space: pre-wrap; word-break: break-word; }
+  .ok { color: #7ddc7d; } .bad { color: #e08189; }
+</style>
+<h1 style="font-size:15px">Phantom server diagnostic</h1>
+<pre id="out">running…</pre>
+<script>
+(async () => {
+    const out = { ua: navigator.userAgent, origin: location.origin };
+    const safe = async (name, fn) => {
+        try { out[name] = await fn(); } catch (e) { out[name] = 'THREW: ' + (e && e.message || e); }
+    };
+
+    await safe('register', async () => {
+        const reg = await navigator.serviceWorker.register('/web/serviceworker.js');
+        // A first registration activates asynchronously; without waiting, every
+        // check below reports the state of a browser that simply has not got there
+        // yet, which looks exactly like a browser that cannot.
+        await navigator.serviceWorker.ready;
+        return { scope: reg.scope, active: !!reg.active, state: reg.active && reg.active.state };
+    });
+
+    // A page that registers a worker is not controlled by it until it reloads,
+    // unless the worker claims it. Ours does, so give the claim a moment.
+    for (let i = 0; i < 40 && !navigator.serviceWorker.controller; i++) {
+        await new Promise((r) => setTimeout(r, 100));
+    }
+    out.controlled = !!navigator.serviceWorker.controller;
+
+    await safe('systemInfo', async () => {
+        const r = await fetch('/System/Info/Public', { cache: 'no-store' });
+        return { status: r.status, body: (await r.text()).slice(0, 200) };
+    });
+
+    await safe('items', async () => {
+        const r = await fetch('/Items?Recursive=true');
+        return { status: r.status, body: (await r.text()).slice(0, 120) };
+    });
+
+    await safe('storage', async () => ({
+        opfs: typeof navigator.storage?.getDirectory === 'function',
+        createWritable: typeof FileSystemFileHandle !== 'undefined'
+            && typeof FileSystemFileHandle.prototype.createWritable === 'function',
+        persisted: navigator.storage?.persisted ? await navigator.storage.persisted() : 'unsupported',
+        estimate: navigator.storage?.estimate ? await navigator.storage.estimate() : 'unsupported'
+    }));
+
+    // Write and read a byte range back, which is the one thing the whole design
+    // rests on and the one most likely to differ between engines.
+    await safe('opfsRoundTrip', async () => {
+        const root = await navigator.storage.getDirectory();
+        const dir = await root.getDirectoryHandle('phantom-diag', { create: true });
+        const fh = await dir.getFileHandle('probe.bin', { create: true });
+        const w = await fh.createWritable();
+        await w.write(new Uint8Array(4096).fill(7));
+        await w.close();
+        const file = await fh.getFile();
+        const slice = await file.slice(100, 200).arrayBuffer();
+        await root.removeEntry('phantom-diag', { recursive: true });
+        return { size: file.size, sliceBytes: slice.byteLength };
+    });
+
+    await safe('indexedDb', async () => {
+        const db = await new Promise((res, rej) => {
+            const r = indexedDB.open('phantom-diag', 1);
+            r.onupgradeneeded = () => r.result.createObjectStore('t', { keyPath: 'id' });
+            r.onsuccess = () => res(r.result);
+            r.onerror = () => rej(r.error);
+        });
+        await new Promise((res, rej) => {
+            const t = db.transaction('t', 'readwrite');
+            t.objectStore('t').put({ id: 1, nested: { a: [1, 2, 3] } });
+            t.oncomplete = res; t.onerror = () => rej(t.error);
+        });
+        db.close();
+        indexedDB.deleteDatabase('phantom-diag');
+        return 'ok';
+    });
+
+    const text = JSON.stringify(out, null, 2);
+    document.getElementById('out').textContent = text;
+    console.log('PHANTOM DIAGNOSTIC ' + JSON.stringify(out));
+})();
+</script>

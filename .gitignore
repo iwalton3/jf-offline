@@ -1,0 +1,4 @@
+# Nothing here is generated, but keep editor and OS noise out.
+*.swp
+.DS_Store
+node_modules/
