@@ -19,7 +19,7 @@ import '/web/plugin/vdx/ui/data/virtual-list.js';
 import { knownServers, SourceServer } from '/web/plugin/source.js';
 import {
     downloadItem, downloadSeries, removeDownload, listDownloads,
-    ensurePersistentStorage, inspectSubtitles
+    ensurePersistentStorage, inspectSubtitles, inspectSeries
 } from '/web/plugin/downloader.js';
 
 // One request per automatic top-up, which happens when the list is
@@ -61,6 +61,10 @@ class OfflineSyncManager extends Component {
         askAudio: [],
         askChoice: 'auto',
         askAudioChoice: '',
+        askSeasons: [],
+        askSeasonId: '',
+        askUnwatchedOnly: false,
+        askSummary: '',
         // Type-to-filter for each list.
         itemFilter: '',
         heldFilter: ''
@@ -112,7 +116,12 @@ class OfflineSyncManager extends Component {
             border: 1px solid var(--border-color);
             background: var(--card-bg);
             border-radius: 3px;
+            transition: opacity .15s ease;
         }
+        /* Busy is shown on the container, not on each row: a row is memoised and
+           would keep whatever it was drawn with. Scrolling still works. */
+        .panel.busy { opacity: .55; }
+        @media (prefers-reduced-motion: reduce) { .panel { transition: none; } }
 
         .scroller {
             height: ${LIST_HEIGHT}px;
@@ -196,6 +205,9 @@ class OfflineSyncManager extends Component {
         .bar { height: 4px; background: #2a2e34; border-radius: 2px; overflow: hidden; }
         .bar > span { display: block; height: 100%; background: var(--primary-color); }
 
+        .check { display: flex; align-items: center; gap: .5em; font-size: 13px; cursor: pointer; }
+        .check input { accent-color: var(--primary-color); width: 1em; height: 1em; }
+
         .ask {
             border: 1px solid var(--primary-color);
             background: var(--card-bg);
@@ -245,6 +257,9 @@ class OfflineSyncManager extends Component {
     }
 
     async guard(label, fn) {
+        // Refused rather than queued: two downloads at once would interleave their
+        // progress messages and compete for the same connection.
+        if (this.state.busy) return;
         this.state.busy = true;
         this.state.error = '';
         this.state.status = label;
@@ -364,14 +379,26 @@ class OfflineSyncManager extends Component {
      * track, forces a transcode, and cannot be changed without downloading the
      * item again.
      */
+    /**
+     * Ask before downloading, but only when there is something to ask.
+     *
+     * A film with no subtitle or audio decision to make has a right answer and a
+     * dialog would be noise. A series always asks, because which seasons and
+     * whether to skip what has been watched are questions with no right answer,
+     * and getting them wrong means downloading gigabytes nobody wanted.
+     */
     start(item) {
         const server = this.server();
         this.guard(`Checking ${item.Name}`, async () => {
-            // A series is asked about once, using its first episode as the sample.
-            const sample = item.Type === 'Series'
-                ? ((await server.episodes(item.Id)).Items || [])[0]
-                : item;
-            if (!sample) throw new Error('series has no episodes');
+            const isSeries = item.Type === 'Series';
+            let series = null;
+            let sample = item;
+
+            if (isSeries) {
+                series = await inspectSeries(server, item);
+                sample = series.sample;
+                if (!sample) throw new Error('series has no episodes');
+            }
 
             const { tracks, audio } = await inspectSubtitles(server, sample);
             const needsSubtitleChoice = tracks.some((t) => !t.canExtract);
@@ -380,15 +407,23 @@ class OfflineSyncManager extends Component {
             // another one has to happen now or not at all.
             const needsAudioChoice = audio.length > 1;
 
-            if (!needsSubtitleChoice && !needsAudioChoice) {
-                await this.run(item, { mode: 'auto' }, null);
+            if (!isSeries && !needsSubtitleChoice && !needsAudioChoice) {
+                await this.run(item, { mode: 'auto' }, null, {});
                 return;
             }
+
             this.state.askTracks = needsSubtitleChoice ? tracks : [];
             this.state.askAudio = needsAudioChoice ? audio : [];
             this.state.askChoice = 'auto';
             const preferred = audio.find((a) => a.isContainerDefault) || audio[0];
             this.state.askAudioChoice = preferred ? String(preferred.index) : '';
+
+            this.state.askSeasons = series ? series.seasons : [];
+            this.state.askSeasonId = '';
+            this.state.askUnwatchedOnly = false;
+            this.state.askSummary = series
+                ? `${series.episodes} episodes, ${series.unwatched} unwatched`
+                : '';
             this.state.asking = item;
         });
     }
@@ -397,11 +432,30 @@ class OfflineSyncManager extends Component {
         const item = this.state.asking;
         const choice = this.state.askChoice;
         const audioChoice = this.state.askAudioChoice;
+        const series = { seasonId: this.state.askSeasonId || null, unwatchedOnly: this.state.askUnwatchedOnly };
         this.state.asking = null;
         const subtitle = choice === 'auto' || choice === 'none'
             ? { mode: choice }
             : { mode: 'burn', index: Number(choice) };
-        this.run(item, subtitle, audioChoice === '' ? null : Number(audioChoice));
+        this.run(item, subtitle, audioChoice === '' ? null : Number(audioChoice), series);
+    }
+
+    onAskSeasonChange(ev) {
+        this.state.askSeasonId = ev.detail ? String(ev.detail.value) : ev.target.value;
+    }
+
+    onAskUnwatchedChange(ev) {
+        this.state.askUnwatchedOnly = !!ev.target.checked;
+    }
+
+    get askSeasonOptions() {
+        const total = this.state.askSeasons.reduce((n, se) => n + se.episodes, 0);
+        return [{ label: `All seasons (${total} episodes)`, value: '' }].concat(
+            this.state.askSeasons.map((se) => ({
+                label: `${se.name} (${se.episodes} episodes, ${se.unwatched} unwatched)`,
+                value: se.id
+            }))
+        );
     }
 
     onAskAudioChange(ev) {
@@ -425,7 +479,7 @@ class OfflineSyncManager extends Component {
 
     // --- downloading ------------------------------------------------------
 
-    run(item, subtitle, audioStreamIndex) {
+    run(item, subtitle, audioStreamIndex, series = {}) {
         const server = this.server();
         // Asked on the gesture, because Firefox only grants persistence while
         // handling one. Without it the browser may evict the whole library.
@@ -441,7 +495,11 @@ class OfflineSyncManager extends Component {
             };
 
             if (item.Type === 'Series') {
-                const result = await downloadSeries(server, item, { subtitle, audioStreamIndex, onProgress });
+                const result = await downloadSeries(server, item, {
+                    subtitle, audioStreamIndex, onProgress,
+                    seasonId: series.seasonId,
+                    unwatchedOnly: series.unwatchedOnly
+                });
                 if (result.failures.length) {
                     this.state.error = `${result.failures.length} of ${result.episodes} episodes failed: `
                         + result.failures.map((f) => f.name).join(', ');
@@ -489,6 +547,16 @@ class OfflineSyncManager extends Component {
         return opts;
     }
 
+    /**
+     * A row.
+     *
+     * Nothing here may read state outside `item`. The virtual list memoises rows
+     * by key, so a row drawn while something else was busy keeps that appearance
+     * for good — which is what left every button greyed out after a filter, since
+     * filtering set `busy` for the length of the request the rows were drawn by.
+     * Re-entry is refused in `guard` instead, where it is one check rather than
+     * one per row.
+     */
     renderItem(item) {
         const held = this.state.held.includes(item.Id);
         return html`
@@ -496,8 +564,7 @@ class OfflineSyncManager extends Component {
                 <span class="name">${item.Name}</span>
                 <span class="tag">${item.Type}${item.ProductionYear ? ' · ' + item.ProductionYear : ''}</span>
                 ${when(held, () => html`<span class="tag held">held</span>`)}
-                <button class="act" disabled="${this.state.busy}"
-                    on-click="${() => this.start(item)}">Download</button>
+                <button class="act" on-click="${() => this.start(item)}">Download</button>
             </div>
         `;
     }
@@ -514,8 +581,7 @@ class OfflineSyncManager extends Component {
                     <span class="tag held">burned in</span>
                 `)}
                 <span class="tag keep">${row.state}</span>
-                <button class="act" disabled="${this.state.busy}"
-                    on-click="${() => this.removeHeld(row)}">Remove</button>
+                <button class="act" on-click="${() => this.removeHeld(row)}">Remove</button>
             </div>
         `;
     }
@@ -615,6 +681,7 @@ class OfflineSyncManager extends Component {
                 ${when(!!s.asking, () => html`
                     <div class="ask">
                         <h3>Before downloading ${s.asking.Name}</h3>
+                        ${when(!!s.askSummary, () => html`<p class="note">${s.askSummary}</p>`)}
                         ${when(s.askTracks.length > 0, () => html`
                             <p class="note">
                                 This item has picture-based subtitles. They carry no text to
@@ -629,6 +696,21 @@ class OfflineSyncManager extends Component {
                                 the file itself defaults to and cannot switch, so choosing another
                                 one means transcoding, and it also fixes that choice for good.
                             </p>
+                        `)}
+                        ${when(s.askSeasons.length > 0, () => html`
+                            <div class="field">
+                                <label for="osx-season">Seasons</label>
+                                <cl-dropdown id="osx-season"
+                                    options="${this.askSeasonOptions}"
+                                    value="${s.askSeasonId}"
+                                    on-change="${(ev) => this.onAskSeasonChange(ev)}"></cl-dropdown>
+                            </div>
+                            <label class="check">
+                                <input type="checkbox" id="osx-unwatched"
+                                    checked="${s.askUnwatchedOnly}"
+                                    on-change="${(ev) => this.onAskUnwatchedChange(ev)}">
+                                <span>Only episodes I have not watched</span>
+                            </label>
                         `)}
                         ${when(s.askTracks.length > 0, () => html`
                             <div class="field">
@@ -666,7 +748,8 @@ class OfflineSyncManager extends Component {
                                     on-input="${(ev) => this.onItemFilter(ev)}">
                             </span>
                         </div>
-                        <div class="panel scroller" on-scroll="${(ev) => this.onListScroll(ev)}">
+                        <div class="panel scroller ${s.busy ? 'busy' : ''}"
+                            on-scroll="${(ev) => this.onListScroll(ev)}">
                             ${when(!s.items.length, () => this.renderSkeletons())}
                             ${when(s.items.length > 0, () => html`
                                 <cl-virtual-list
@@ -697,7 +780,7 @@ class OfflineSyncManager extends Component {
                     </div>
                     ${when(!s.downloads.length, () => html`<p class="note">Nothing downloaded yet.</p>`)}
                     ${when(s.downloads.length > 0, () => html`
-                        <div class="panel scroller">
+                        <div class="panel scroller ${s.busy ? 'busy' : ''}">
                             <cl-virtual-list
                                 items="${this.filteredDownloads}"
                                 itemHeight="${ROW_HEIGHT}"

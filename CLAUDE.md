@@ -51,8 +51,21 @@ HEADFUL=1 ... node tools/smoke.js   # to watch it
   bundles carry a content hash; the overlay's files do not. Caching ours first
   serves last session's module forever, and the symptom is an import failing for
   an export plainly present in the file on disk.
-- **Query parameter case is not consistent.** The same screen sends both
-  `IncludeItemTypes` and `includeItemTypes`. Read them through `PS_HTTP.Params`.
+- **Query parameters are inconsistent in two ways, and both bite.** Case varies
+  (`IncludeItemTypes` beside `includeItemTypes`), and list values arrive
+  **repeated** — `includeItemTypes=Movie&includeItemTypes=Series&…` — as well as
+  comma-separated elsewhere. Reading only the last value made the search screen
+  ask for a dozen types and receive a filter of one, so every section but the
+  first looked empty. Always read through `PS_HTTP.Params`.
+- **Never empty the live cache.** Fill a new versioned cache, swap the stored
+  pointer, then delete the old one. Deleting first left tens of seconds with
+  nothing cached, and writes issued in that window went into a deleted cache and
+  vanished — an app that stopped working intermittently, always just after an
+  update.
+- **A row inside `cl-virtual-list` may read nothing but its own item.** Rows are
+  memoised by key, so a row drawn while the component was busy keeps that
+  appearance for good. This is how every download button ended up greyed out
+  after a filter.
 - **A worker cannot intercept a WebSocket.** No hook exists, and jellyfin-web will
   open one, because every item grid subscribes to `UserDataChanged` on mount
   (`emby-itemscontainer.js:294`). `ps-bootstrap.js` stands in for it.

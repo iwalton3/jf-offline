@@ -35,11 +35,23 @@
     class Params {
         constructor(searchParams) {
             this.map = new Map();
-            for (const [k, v] of searchParams) this.map.set(k.toLowerCase(), v);
+            for (const [k, v] of searchParams) {
+                const key = k.toLowerCase();
+                // REPEATED, not comma-separated. jellyfin-web sends list-valued
+                // parameters as `includeItemTypes=Movie&includeItemTypes=Series&...`
+                // and also sends some of them comma-separated elsewhere, so both
+                // spellings have to survive. Keeping only the last value made the
+                // search screen ask for Movie..BoxSet and receive a filter of
+                // BoxSet alone, which is a library that appears to hold nothing.
+                const bucket = this.map.get(key);
+                if (bucket) bucket.push(v);
+                else this.map.set(key, [v]);
+            }
         }
+        /** The first value. A scalar parameter only ever has one. */
         get(name, fallback) {
             const v = this.map.get(String(name).toLowerCase());
-            return v === undefined || v === '' ? fallback : v;
+            return !v || v[0] === undefined || v[0] === '' ? fallback : v[0];
         }
         int(name, fallback) {
             const v = parseInt(this.get(name), 10);
@@ -50,10 +62,17 @@
             if (v === undefined) return fallback;
             return String(v).toLowerCase() === 'true';
         }
-        /** Comma-separated list, empty array when absent. */
+        /** Every value, with comma-separated ones split. Empty array when absent. */
         list(name) {
-            const v = this.get(name);
-            return v ? String(v).split(',').map((s) => s.trim()).filter(Boolean) : [];
+            const values = this.map.get(String(name).toLowerCase()) || [];
+            const out = [];
+            for (const value of values) {
+                for (const part of String(value).split(',')) {
+                    const trimmed = part.trim();
+                    if (trimmed) out.push(trimmed);
+                }
+            }
+            return out;
         }
         has(name) {
             return this.map.has(String(name).toLowerCase());

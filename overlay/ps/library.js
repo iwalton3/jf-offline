@@ -225,6 +225,16 @@
         if (types.length) candidates = candidates.filter((r) => types.includes(String(r.dto.Type).toLowerCase()));
         if (excludeTypes.length) candidates = candidates.filter((r) => !excludeTypes.includes(String(r.dto.Type).toLowerCase()));
 
+        // mediaTypes is how the search screen separates its sections: the video
+        // section asks for MediaType Video, and a Series has no media type at all
+        // because it is a folder. Ignoring it puts every result in the first
+        // section and leaves the rest looking empty.
+        const mediaTypes = p.list('mediaTypes').map((m) => m.toLowerCase());
+        if (mediaTypes.length) {
+            candidates = candidates.filter((r) =>
+                mediaTypes.includes(String(r.dto.MediaType || '').toLowerCase()));
+        }
+
         let dtos = candidates.map((r) => present(r, udMap));
 
         if (searchTerm) dtos = rankSearch(dtos, searchTerm);

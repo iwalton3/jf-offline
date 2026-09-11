@@ -43,20 +43,39 @@ if (IS_SERVICE_WORKER) {
     );
 }
 
-const APP_CACHE = 'phantom-app';
+/* Caches are named for the manifest version they hold, and the *active* name is
+ * a stored pointer rather than a constant.
+ *
+ * The previous version deleted the live cache and refilled it, which left a
+ * window of tens of seconds during which the app had nothing cached — an app
+ * that intermittently stopped working, and always right after an update. Writes
+ * issued during that window went into a deleted cache and vanished.
+ *
+ * So: fill the new cache completely, swap the pointer, and only then drop the
+ * old one. A reader is always looking at a cache that is whole.
+ */
+const CACHE_PREFIX = 'phantom-app-';
+// Used until the first precache completes, so a first visit still caches.
+const BOOTSTRAP_CACHE = CACHE_PREFIX + 'runtime';
 
 if (IS_SERVICE_WORKER) {
     self.addEventListener('install', (event) => {
         event.waitUntil(self.skipWaiting());
     });
 
+    /** The cache the app is currently served from. */
+    async function activeCacheName() {
+        const version = await self.PS_DB.meta.get('precacheVersion', null);
+        return version ? CACHE_PREFIX + version : BOOTSTRAP_CACHE;
+    }
+
+    const activeCache = async () => caches.open(await activeCacheName());
+
     self.addEventListener('activate', (event) => {
-        event.waitUntil((async () => {
-            for (const name of await caches.keys()) {
-                if (name.startsWith('phantom-app') && name !== APP_CACHE) await caches.delete(name);
-            }
-            await self.clients.claim();
-        })());
+        // Nothing is deleted here. A new worker version says nothing about whether
+        // the assets it holds are stale, and dropping them on activation is exactly
+        // the window this design exists to remove.
+        event.waitUntil(self.clients.claim());
     });
 
     // --- app shell -----------------------------------------------------------
@@ -84,8 +103,11 @@ if (IS_SERVICE_WORKER) {
         || pathname === '/web/diag.html';
 
     async function appShell(request, url) {
-        const cache = await caches.open(APP_CACHE);
-        const key = new Request(url.pathname, { method: 'GET' });
+        const cache = await activeCache();
+        // Navigations are keyed on the document itself, which is the name the
+        // manifest uses, so a precached cache already holds the entry a
+        // navigation will look for.
+        const key = isNavigation(request, url) ? '/web/index.html' : url.pathname;
 
         if (isNavigation(request, url)) {
             // Network first, so an updated build lands without clearing storage;
@@ -153,15 +175,25 @@ if (IS_SERVICE_WORKER) {
         if (precacheRun) return precacheRun;
         precacheRun = (async () => {
             const manifest = await (await fetch('/web/precache-manifest.json', { cache: 'no-store' })).json();
-            const held = await self.PS_DB.meta.get('precacheVersion', null);
+            const target = CACHE_PREFIX + manifest.version;
+            const currentName = await activeCacheName();
+            const fresh = await caches.open(target);
 
-            if (held !== manifest.version) {
-                // The build changed: everything held describes the previous one.
-                await caches.delete(APP_CACHE);
-                await self.PS_DB.meta.set('precacheVersion', manifest.version);
+            // Carry over what the previous cache already holds, but only for URLs
+            // that pin their content with a hash. jellyfin-web's bundles do, so a
+            // rebuild copies almost everything instead of re-downloading 55 MB;
+            // the overlay's files do not, so they are always fetched again.
+            if (currentName !== target) {
+                const previous = await caches.open(currentName);
+                for (const url of manifest.files) {
+                    const path = new URL(url, self.location.origin).pathname;
+                    if (isOverlayAsset(path) || path === '/web/index.html') continue;
+                    if (await fresh.match(url)) continue;
+                    const hit = await previous.match(url);
+                    if (hit) await fresh.put(url, hit);
+                }
             }
 
-            const fresh = await caches.open(APP_CACHE);
             const pending = [];
             for (const url of manifest.files) {
                 if (!(await fresh.match(url))) pending.push(url);
@@ -192,6 +224,16 @@ if (IS_SERVICE_WORKER) {
                 }
             };
             await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+
+            // The swap. Everything above wrote into a cache nobody was reading;
+            // this one line is what makes it live, and it happens only once the
+            // cache is complete.
+            await self.PS_DB.meta.set('precacheVersion', manifest.version);
+
+            for (const name of await caches.keys()) {
+                if (name.startsWith(CACHE_PREFIX) && name !== target) await caches.delete(name);
+            }
+
             report();
             return { done, total, version: manifest.version };
         })().finally(() => { precacheRun = null; });
@@ -201,9 +243,14 @@ if (IS_SERVICE_WORKER) {
     async function precacheStatus() {
         const manifest = await (await fetch('/web/precache-manifest.json', { cache: 'no-store' }))
             .json().catch(() => null);
-        if (!manifest) return { offline: true };
-        const cache = await caches.open(APP_CACHE);
-        const keys = await cache.keys();
+        if (!manifest) {
+            // Offline: report what the live cache holds rather than nothing, so the
+            // settings page does not claim the app is unheld while it is serving it.
+            const held = await (await activeCache()).keys();
+            return { done: held.length, total: held.length, offline: true };
+        }
+        const building = await caches.open(CACHE_PREFIX + manifest.version);
+        const keys = await building.keys();
         return { done: keys.length, total: manifest.files.length, version: manifest.version };
     }
 

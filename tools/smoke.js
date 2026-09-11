@@ -26,6 +26,8 @@ const ASS_ITEM = process.env.JF_ASS_ITEM || 'c481c35858cfe4b4ec22187d8c96dc92';
 const MULTI_AUDIO_ITEM = process.env.JF_AUDIO_ITEM || 'c72448f6b10acfae9edd95c2b1d06775';
 // One subtitle track, flagged forced.
 const FORCED_SUB_ITEM = process.env.JF_FORCED_ITEM || '7eda0c4da7bb755f0e6ef4f6e84caad8';
+// Three seasons, sixty episodes: enough to tell a season filter from no filter.
+const MULTI_SEASON_SERIES = process.env.JF_SERIES || '2f9ea3e079631ea97fae6ebadb569063';
 const HEADFUL = !!process.env.HEADFUL;
 
 const results = [];
@@ -632,6 +634,111 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         `${search.hintCount} hints`);
     check('an exact title ranks first', search.bestFirst === true);
 
+    // ---- 6e. picking what of a series to take ----------------------------
+
+    const seriesOptions = await page.evaluate(async (pid, seriesId) => {
+        const { knownServers, SourceServer } = await import('/web/plugin/source.js');
+        const { inspectSeries, downloadSeries } = await import('/web/plugin/downloader.js');
+        const server = new SourceServer(knownServers(pid)[0]);
+        const dto = await server.item(seriesId);
+        const info = await inspectSeries(server, dto);
+
+        // A season id that matches nothing proves the filter is applied rather
+        // than ignored, without downloading twenty episodes to find out.
+        const none = await downloadSeries(server, dto, { seasonId: 'nosuchseason' });
+
+        return {
+            seasons: info.seasons.length,
+            perSeason: info.seasons.map((se) => se.episodes),
+            total: info.episodes,
+            unwatched: info.unwatched,
+            filteredToNothing: none.episodes
+        };
+    }, phantomId, MULTI_SEASON_SERIES);
+
+    check('a series reports its seasons and their episode counts',
+        seriesOptions.seasons > 1 && seriesOptions.perSeason.every((n) => n > 0),
+        `${seriesOptions.seasons} seasons: ${seriesOptions.perSeason.join('/')} of ${seriesOptions.total}`);
+    check('a season filter actually filters', seriesOptions.filteredToNothing === 0,
+        String(seriesOptions.filteredToNothing));
+
+    const unwatched = await page.evaluate(async (pid, seriesId) => {
+        const { knownServers, SourceServer } = await import('/web/plugin/source.js');
+        const { inspectSeries, downloadSeries } = await import('/web/plugin/downloader.js');
+        const server = new SourceServer(knownServers(pid)[0]);
+        const dto = await server.item(seriesId);
+
+        const before = await inspectSeries(server, dto);
+        const episodes = (await server.episodes(seriesId)).Items;
+        // Mark every episode played on the SOURCE, so "unwatched only" has
+        // nothing left to take.
+        for (const ep of episodes) {
+            await server.fetch(`${server.url}/UserPlayedItems/${ep.Id}?userId=${server.userId}`, { method: 'POST' });
+        }
+        const after = await inspectSeries(server, dto);
+        const took = await downloadSeries(server, dto, { unwatchedOnly: true });
+
+        for (const ep of episodes) {
+            await server.fetch(`${server.url}/UserPlayedItems/${ep.Id}?userId=${server.userId}`, { method: 'DELETE' });
+        }
+        return { beforeUnwatched: before.unwatched, afterUnwatched: after.unwatched, took: took.episodes, total: before.episodes };
+    }, phantomId, MULTI_SEASON_SERIES);
+
+    check('watched state is read back from the source',
+        unwatched.beforeUnwatched === unwatched.total && unwatched.afterUnwatched === 0,
+        `${unwatched.beforeUnwatched} then ${unwatched.afterUnwatched} of ${unwatched.total}`);
+    check('"only unwatched" takes nothing when everything is watched',
+        unwatched.took === 0, String(unwatched.took));
+
+    // jellyfin-web sends list parameters REPEATED, not comma separated. Keeping
+    // only the last value made the search screen ask for a dozen types and get a
+    // filter of one, so the library looked empty in every section but the first.
+    const repeated = await page.evaluate(async () => {
+        const uid = window.ApiClient.getCurrentUserId();
+        const get = async (u) => (await (await fetch(u)).json());
+        const repeatedTypes = await get(
+            `/Items?userId=${uid}&Recursive=true&includeItemTypes=Movie&includeItemTypes=Series`);
+        const commaTypes = await get(
+            `/Items?userId=${uid}&Recursive=true&includeItemTypes=Movie,Series`);
+        const videoOnly = await get(`/Items?userId=${uid}&Recursive=true&mediaTypes=Video`);
+        const excluded = await get(
+            `/Items?userId=${uid}&Recursive=true&excludeItemTypes=Movie&excludeItemTypes=Episode`);
+        const types = (r) => [...new Set(r.Items.map((i) => i.Type))].sort();
+        return {
+            repeated: types(repeatedTypes),
+            comma: types(commaTypes),
+            videoOnly: types(videoOnly),
+            excluded: types(excluded)
+        };
+    });
+    check('repeated list parameters are all read, not just the last',
+        repeated.repeated.includes('Movie') && repeated.repeated.includes('Series'),
+        repeated.repeated.join(','));
+    check('a comma-separated list still works', repeated.comma.join(',') === repeated.repeated.join(','),
+        repeated.comma.join(','));
+    check('mediaTypes excludes folders like Series',
+        !repeated.videoOnly.includes('Series') && repeated.videoOnly.length > 0,
+        repeated.videoOnly.join(','));
+    check('repeated excludeItemTypes all apply',
+        !repeated.excluded.includes('Movie') && !repeated.excluded.includes('Episode'),
+        repeated.excluded.join(','));
+
+    // The reported symptom: search showed videos and never a series.
+    const seriesSearch = await page.evaluate(async () => {
+        const uid = window.ApiClient.getCurrentUserId();
+        const all = await (await fetch(`/Items?userId=${uid}&Recursive=true&includeItemTypes=Series`)).json();
+        if (!all.Items.length) return { skipped: true };
+        const name = all.Items[0].Name;
+        const word = name.split(' ')[0];
+        const hit = await (await fetch(
+            `/Items?userId=${uid}&Recursive=true&searchTerm=${encodeURIComponent(word)}&includeItemTypes=Movie&includeItemTypes=Series&includeItemTypes=Episode`
+        )).json();
+        return { name, word, types: [...new Set(hit.Items.map((i) => i.Type))], found: hit.Items.some((i) => i.Id === all.Items[0].Id) };
+    });
+    check('a search finds series, not only videos',
+        seriesSearch.skipped || seriesSearch.found === true,
+        seriesSearch.skipped ? 'no series held' : `"${seriesSearch.word}" -> ${seriesSearch.types.join(',')}`);
+
     // ---- 6c. the offline app shell ---------------------------------------
 
     const manifest = await page.evaluate(async () => {
@@ -669,6 +776,18 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     });
     check('the app shell precaches in the background', precached.grew === true,
         `${precached.done} of ${precached.total}`);
+
+    const caches_ = await page.evaluate(async () => {
+        const names = (await caches.keys()).filter((n) => n.startsWith('phantom-app-'));
+        const counts = {};
+        for (const n of names) counts[n] = (await (await caches.open(n)).keys()).length;
+        const active = names.find((n) => counts[n] > 100);
+        return { names, counts, hasIndex: active ? !!(await (await caches.open(active)).match('/web/index.html')) : false };
+    });
+    check('exactly one app cache survives a completed precache',
+        caches_.names.length === 1, caches_.names.join(', '));
+    check('the live cache holds the document a navigation asks for',
+        caches_.hasIndex === true, JSON.stringify(caches_.counts));
 
     // ---- 7. play state ----------------------------------------------------
 
@@ -780,6 +899,22 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     check('the list pages past the first page as it scrolls',
         !uiPaging.error && (uiPaging.total <= uiPaging.afterFirst || uiPaging.afterSecond > uiPaging.afterFirst),
         uiPaging.error || `${uiPaging.afterFirst} then ${uiPaging.afterSecond} of ${uiPaging.total}`);
+    const rowState = await page.evaluate(async () => {
+        const el = document.querySelector('offline-sync-manager');
+        const root = el.shadowRoot || el;
+        // Filtering sets the component busy for the length of the request the rows
+        // are drawn by; a row that reads `busy` is memoised in that state for good.
+        el.state.busy = true;
+        await new Promise((r) => setTimeout(r, 300));
+        el.state.busy = false;
+        await new Promise((r) => setTimeout(r, 500));
+        const buttons = [...root.querySelectorAll('.item button.act')];
+        return { count: buttons.length, disabled: buttons.filter((b) => b.disabled).length };
+    });
+    check('rows keep working buttons after a busy render',
+        rowState.count > 0 && rowState.disabled === 0,
+        `${rowState.disabled} of ${rowState.count} disabled`);
+
     check('paged items are not duplicated',
         !uiPaging.error && uiPaging.distinct === uiPaging.afterSecond,
         uiPaging.error || `${uiPaging.distinct} distinct of ${uiPaging.afterSecond}`);
@@ -847,8 +982,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const offlineRoute = await page.evaluate(async () => {
         // A lazily-loaded chunk for a route this session never opened. Cached on
         // demand it would not be here; precached, it is.
-        const manifest = await caches.open('phantom-app').then((c) => c.keys());
-        const chunks = manifest.map((r) => new URL(r.url).pathname).filter((p) => p.endsWith('.chunk.js'));
+        const names = (await caches.keys()).filter((n) => n.startsWith('phantom-app-'));
+        let entries = [];
+        for (const name of names) {
+            const keys = await (await caches.open(name)).keys();
+            if (keys.length > entries.length) entries = keys;
+        }
+        const chunks = entries.map((r) => new URL(r.url).pathname).filter((p) => p.endsWith('.chunk.js'));
         if (!chunks.length) return { error: 'no chunks held' };
         const res = await fetch(chunks[Math.floor(chunks.length / 2)]);
         return { status: res.status, held: chunks.length, sample: chunks[Math.floor(chunks.length / 2)] };

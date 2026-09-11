@@ -24,6 +24,8 @@
   never visited, the download manager included.
 - **Search** over the held library, ranked by where the match falls, plus the
   type-ahead hints the search screen draws first.
+- **Picking part of a series**: a single season, or only the episodes not yet
+  watched, read from the source server's own watched state.
 - **Dual audio.** A browser plays whichever track the container defaults to and
   cannot switch, so the settings page asks at sync time; choosing another track
   transcodes with it selected.

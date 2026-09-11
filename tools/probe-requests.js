@@ -74,6 +74,22 @@ const log = (...a) => console.error('[probe]', ...a);
     if (ids.seriesId) await goto(`#/details?id=${ids.seriesId}`, 'detail-series', 5000);
     if (ids.seasonId) await goto(`#/details?id=${ids.seasonId}`, 'detail-season', 5000);
 
+    // The search screen, typed into rather than navigated to: it only issues
+    // requests once there is a term.
+    phase = 'search';
+    await page.goto(`${BASE}/web/#/search.html`, { waitUntil: 'networkidle2', timeout: 45000 }).catch(() => {});
+    await new Promise(r => setTimeout(r, 2500));
+    await page.evaluate(() => {
+        const input = document.querySelector('input[type=\'search\'], .searchfields input, #searchTextInput');
+        if (!input) return false;
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        setter.call(input, 'passage');
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+    });
+    await new Promise(r => setTimeout(r, 6000));
+
     await browser.close();
 
     // Collapse to unique shapes, keeping which screen asked for each.

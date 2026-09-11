@@ -145,6 +145,10 @@ export class SourceServer {
     episodes(seriesId) {
         return this.json(`/Shows/${seriesId}/Episodes`, {
             userId: this.userId,
+            // UserData rides on this flag rather than on Fields, and without it
+            // every episode looks unwatched, which is the opposite of useful when
+            // the point is to download only the ones that are.
+            EnableUserData: true,
             Fields: 'Overview,MediaSources,ParentId,DateCreated,PremiereDate,Trickplay'
         });
     }

@@ -514,6 +514,7 @@ export async function inspectSubtitles(server, reactiveDto) {
 export async function downloadSeries(server, reactiveSeriesDto, options = {}) {
     const seriesDto = plain(reactiveSeriesDto);
     const onProgress = options.onProgress || (() => {});
+
     const [seasons, episodes] = await Promise.all([
         server.seasons(seriesDto.Id),
         server.episodes(seriesDto.Id)
@@ -521,12 +522,19 @@ export async function downloadSeries(server, reactiveSeriesDto, options = {}) {
 
     await putItem(server, seriesDto);
     await putImages(server, seriesDto);
+
+    // Season rows are stored for every season, not only the one being downloaded:
+    // offline browsing has nobody to ask what an episode belongs to, and a season
+    // with nothing in it renders as an empty season rather than as a broken one.
     for (const season of seasons.Items || []) {
         await putItem(server, season);
         await putImages(server, season);
     }
 
-    const list = episodes.Items || [];
+    let list = episodes.Items || [];
+    if (options.seasonId) list = list.filter((ep) => ep.SeasonId === options.seasonId);
+    if (options.unwatchedOnly) list = list.filter((ep) => !(ep.UserData && ep.UserData.Played));
+
     const failures = [];
     for (let i = 0; i < list.length; i++) {
         onProgress(i, list.length, 'episodes', list[i].Name);
@@ -542,6 +550,29 @@ export async function downloadSeries(server, reactiveSeriesDto, options = {}) {
     }
     onProgress(list.length, list.length, 'episodes');
     return { episodes: list.length, failures };
+}
+
+/** Seasons and episode counts, for the question asked before a series download. */
+export async function inspectSeries(server, reactiveDto) {
+    const dto = plain(reactiveDto);
+    const [seasons, episodes] = await Promise.all([
+        server.seasons(dto.Id),
+        server.episodes(dto.Id)
+    ]);
+    const list = episodes.Items || [];
+    const unwatched = list.filter((ep) => !(ep.UserData && ep.UserData.Played));
+    return {
+        seasons: (seasons.Items || []).map((season) => ({
+            id: season.Id,
+            name: season.Name,
+            indexNumber: season.IndexNumber,
+            episodes: list.filter((ep) => ep.SeasonId === season.Id).length,
+            unwatched: unwatched.filter((ep) => ep.SeasonId === season.Id).length
+        })),
+        episodes: list.length,
+        unwatched: unwatched.length,
+        sample: list[0] || null
+    };
 }
 
 export async function removeDownload(reactiveRow) {
