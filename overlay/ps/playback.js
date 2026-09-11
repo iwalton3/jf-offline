@@ -66,19 +66,36 @@
         // Only offer subtitle tracks we actually hold. A track the player can
         // select and then cannot fetch is worse than one that was never offered,
         // and a burned-in track is in the picture rather than in a list.
+        //
+        // Codec is reported as the format actually stored, because that is what
+        // routes the track: htmlVideoPlayer sends 'ass' and 'ssa' to libass and
+        // everything else to a native <track>. Reporting webvtt for an ASS file
+        // would hand a styled script to the wrong renderer.
         base.MediaStreams = streams.map((st) => {
             if (st.Type !== 'Subtitle') return st;
             const held = (dl.subtitles || []).find((sub) => sub.index === st.Index);
             if (!held) return null;
+            const format = held.format || 'vtt';
             return Object.assign({}, st, {
-                Codec: 'webvtt',
+                Codec: format === 'vtt' ? 'webvtt' : format,
                 IsExternal: true,
                 IsTextSubtitleStream: true,
                 SupportsExternalStream: true,
                 DeliveryMethod: 'External',
-                DeliveryUrl: `/videos/${dl.itemId}/${dl.sourceId}/Subtitles/${st.Index}/0/Stream.vtt`
+                DeliveryUrl: `/videos/${dl.itemId}/${dl.sourceId}/Subtitles/${st.Index}/0/Stream.${format}`
             });
         }).filter(Boolean);
+
+        // Fonts an ASS track was authored against. libass reads these from
+        // MediaAttachments; without them it substitutes and the typesetting is
+        // wrong in ways that are obvious on anime and invisible on plain dialogue.
+        base.MediaAttachments = (dl.attachments || []).map((att) => ({
+            Codec: att.codec,
+            Index: att.index,
+            FileName: att.fileName,
+            MimeType: att.mimeType,
+            DeliveryUrl: `/videos/${dl.itemId}/${dl.sourceId}/Attachments/${att.index}`
+        }));
 
         if (dl.mode === S.DOWNLOAD_MODE.HLS) {
             return Object.assign(base, {
@@ -170,12 +187,29 @@
         return serveFile(file, ctx.request, 'video/mp2t');
     }
 
+    const SUBTITLE_MIME = {
+        vtt: 'text/vtt; charset=utf-8',
+        ass: 'text/x-ssa; charset=utf-8',
+        ssa: 'text/x-ssa; charset=utf-8',
+        srt: 'application/x-subrip; charset=utf-8'
+    };
+
     async function subtitle(ctx, itemId, index) {
         const dl = await findDownload(itemId);
         if (!dl) return notFound('no download for ' + itemId);
-        const file = await OPFS.file(S.paths.subtitle(dl.srv, dl.itemId, dl.sourceId, index));
+        const held = (dl.subtitles || []).find((sub) => sub.index === index);
+        const format = (held && held.format) || 'vtt';
+        const file = await OPFS.file(S.paths.subtitle(dl.srv, dl.itemId, dl.sourceId, index, format));
         if (!file) return notFound('subtitle ' + index);
-        return text(await file.text(), 'text/vtt; charset=utf-8');
+        return text(await file.text(), SUBTITLE_MIME[format] || 'text/plain; charset=utf-8');
+    }
+
+    async function attachment(ctx, itemId, index) {
+        const dl = await findDownload(itemId);
+        if (!dl) return notFound('no download for ' + itemId);
+        const held = (dl.attachments || []).find((att) => att.index === index);
+        const file = await OPFS.file(S.paths.attachment(dl.srv, dl.itemId, dl.sourceId, index));
+        return serveFile(file, ctx.request, (held && held.mimeType) || 'application/octet-stream');
     }
 
     async function trickplayTile(ctx, itemId, width, index) {
@@ -302,7 +336,7 @@
     }
 
     g.PS_PLAYBACK = {
-        playbackInfo, stream, hlsPlaylist, hlsSegment, subtitle, trickplayTile,
+        playbackInfo, stream, hlsPlaylist, hlsSegment, subtitle, attachment, trickplayTile,
         reportProgress, setPlayed, setFavorite, toUserDataDto,
         findDownload, findItem
     };

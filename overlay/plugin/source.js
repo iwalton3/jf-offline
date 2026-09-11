@@ -74,6 +74,11 @@ export function deviceProfile() {
         ContainerProfiles: [],
         CodecProfiles: [],
         SubtitleProfiles: [
+            // ass and ssa are declared deliverable because jellyfin-web renders
+            // them with libass. Leaving them out tells the server they can only be
+            // burned in, which is exactly the transcode this avoids.
+            { Format: 'ass', Method: 'External' },
+            { Format: 'ssa', Method: 'External' },
             { Format: 'vtt', Method: 'External' },
             { Format: 'subrip', Method: 'External' }
         ]
@@ -164,9 +169,13 @@ export class SourceServer {
         return res.json();
     }
 
-    /** A text subtitle track, extracted by the server as WebVTT. */
-    subtitleUrl(itemId, mediaSourceId, index) {
-        return `${this.url}/Videos/${itemId}/${mediaSourceId}/Subtitles/${index}/0/Stream.vtt`;
+    /** A text subtitle track, extracted by the server in the format asked for. */
+    subtitleUrl(itemId, mediaSourceId, index, format) {
+        return `${this.url}/Videos/${itemId}/${mediaSourceId}/Subtitles/${index}/0/Stream.${format || 'vtt'}`;
+    }
+
+    attachmentUrl(itemId, mediaSourceId, index) {
+        return `${this.url}/Videos/${itemId}/${mediaSourceId}/Attachments/${index}`;
     }
 
     trickplayTileUrl(itemId, width, index) {

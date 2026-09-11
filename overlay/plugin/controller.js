@@ -397,7 +397,7 @@ class OfflineSyncManager extends Component {
 
     get askOptions() {
         const opts = [
-            { label: 'Extract text tracks as subtitles', value: 'auto' },
+            { label: 'Keep text tracks (styling preserved)', value: 'auto' },
             { label: 'No subtitles', value: 'none' }
         ];
         for (const t of this.state.askTracks) {

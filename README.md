@@ -36,6 +36,15 @@ Two files in the built output, neither of them application code:
 `serve.py` does not copy them over the build. It serves `overlay/` in front of
 `dist/`, so the overlay directory **is** the diff.
 
+### Subtitles keep their format
+
+ASS and SSA are stored as themselves and rendered by jellyfin-web's libass, with
+the fonts embedded in the container downloaded alongside. That matters for
+anything typeset rather than merely captioned: a styled track survives even when
+the video had to be transcoded, so it does not have to be burned in. Only
+picture-based tracks have nothing to extract, and those are the only case where
+the settings page asks a question.
+
 ### Offline, properly
 
 The app itself is held offline, not just the media. jellyfin-web is two thousand

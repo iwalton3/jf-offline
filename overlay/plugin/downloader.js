@@ -125,21 +125,85 @@ export function subtitleOptions(mediaSource) {
         }));
 }
 
+/**
+ * The format to keep a track in.
+ *
+ * ASS and SSA stay as themselves, because jellyfin-web renders them with libass
+ * and converting to WebVTT discards the positioning, styling and typesetting
+ * that is the whole reason those formats exist. Everything else becomes WebVTT,
+ * which a <track> element can play natively.
+ */
+function subtitleFormat(codec) {
+    const c = String(codec || '').toLowerCase();
+    return (c === 'ass' || c === 'ssa') ? c : 'vtt';
+}
+
 async function downloadSubtitles(server, dto, mediaSource, tracks) {
     const held = [];
     for (const track of tracks) {
+        const format = subtitleFormat(track.codec);
         try {
-            const res = await server.fetch(server.subtitleUrl(dto.Id, mediaSource.Id, track.index));
+            const res = await server.fetch(server.subtitleUrl(dto.Id, mediaSource.Id, track.index, format));
             const body = await res.text();
             if (!body.trim()) continue;
             await OPFS().writeBlob(
-                S().paths.subtitle(server.id, dto.Id, mediaSource.Id, track.index),
-                new Blob([body], { type: 'text/vtt' })
+                S().paths.subtitle(server.id, dto.Id, mediaSource.Id, track.index, format),
+                new Blob([body], { type: 'text/plain' })
             );
-            held.push({ index: track.index, language: track.language, title: track.title });
+            held.push({
+                index: track.index,
+                language: track.language,
+                title: track.title,
+                codec: track.codec,
+                format
+            });
         } catch (err) {
             // A track that will not extract is not worth failing the item over.
             console.warn('[phantom] subtitle', track.index, dto.Id, err.message);
+        }
+    }
+    return held;
+}
+
+// The mime types htmlVideoPlayer will hand to libass; everything else in a
+// container's attachments is cover art and similar, which ffmpeg often cannot
+// extract anyway.
+const FONT_MIME_TYPES = [
+    'application/vnd.ms-opentype',
+    'application/x-truetype-font',
+    'font/otf',
+    'font/ttf',
+    'font/woff',
+    'font/woff2'
+];
+
+/**
+ * Fonts an ASS track was authored against.
+ *
+ * Without them libass substitutes, and the result is wrong in ways that are
+ * obvious on typeset anime and invisible on plain dialogue — so it is worth
+ * fetching files that can run to tens of megabytes.
+ */
+async function downloadAttachments(server, dto, mediaSource) {
+    const wanted = (mediaSource.MediaAttachments || [])
+        .filter((att) => FONT_MIME_TYPES.includes(att.MimeType));
+
+    const held = [];
+    for (const att of wanted) {
+        try {
+            const res = await server.fetch(server.attachmentUrl(dto.Id, mediaSource.Id, att.Index));
+            await OPFS().writeBlob(
+                S().paths.attachment(server.id, dto.Id, mediaSource.Id, att.Index),
+                await res.blob()
+            );
+            held.push({
+                index: att.Index,
+                fileName: att.FileName,
+                mimeType: att.MimeType,
+                codec: att.Codec
+            });
+        } catch (err) {
+            console.warn('[phantom] attachment', att.Index, dto.Id, err.message);
         }
     }
     return held;
@@ -327,6 +391,7 @@ export async function downloadItem(server, reactiveDto, options = {}) {
         subtitleMode: subtitle.mode,
         burnedSubtitleIndex: burning ? subtitle.index : null,
         subtitles: [],
+        attachments: [],
         trickplay: null,
         // Never null, and always written. Auto-download does not exist yet, but a
         // nullable origin meeting three-valued logic is how a reaper ends up
@@ -360,6 +425,9 @@ export async function downloadItem(server, reactiveDto, options = {}) {
             ? []
             : await downloadSubtitles(server, dto, mediaSource, tracks.filter((t) => t.canExtract));
 
+        // Fonts go with the subtitles that need them, so they are skipped for the
+        // same reasons: a burned-in track is already typeset into the picture.
+        const attachments = held.length ? await downloadAttachments(server, dto, mediaSource) : [];
         const trickplay = await downloadTrickplay(server, dto, mediaSource);
 
         await putItem(server, dto);
@@ -372,6 +440,7 @@ export async function downloadItem(server, reactiveDto, options = {}) {
             bytesTotal: result.bytes,
             segments: result.segments || 0,
             subtitles: held,
+            attachments,
             trickplay
         });
         return row;

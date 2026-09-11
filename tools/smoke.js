@@ -20,6 +20,8 @@ const DIRECT_ITEM = process.env.JF_DIRECT_ITEM || '564f0e0061169c95971a719eb8789
 // Nine extractable subrip tracks, and one with only a picture-based track.
 const SUBTITLE_ITEM = process.env.JF_SUBTITLE_ITEM || '585d3907f46356aceeecff57c7f4f030';
 const BURN_ITEM = process.env.JF_BURN_ITEM || 'b7e1d10a787bf92cbb75f4ffef2a8197';
+// A styled ASS track with the font it was authored against embedded alongside.
+const ASS_ITEM = process.env.JF_ASS_ITEM || 'c481c35858cfe4b4ec22187d8c96dc92';
 const HEADFUL = !!process.env.HEADFUL;
 
 const results = [];
@@ -475,6 +477,56 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     check('a burned-in track is not also offered as a switchable one',
         burned.subtitleStreams === 0, String(burned.subtitleStreams));
 
+    // Styled subtitles must survive as themselves. jellyfin-web renders ass and
+    // ssa with libass; converting them to WebVTT on the way in would throw away
+    // the typesetting and there would be no way to get it back.
+    const ass = await page.evaluate(async (pid, id) => {
+        const { knownServers, SourceServer } = await import('/web/plugin/source.js');
+        const { downloadItem } = await import('/web/plugin/downloader.js');
+        const server = new SourceServer(knownServers(pid)[0]);
+        const item = await server.item(id);
+        const row = await downloadItem(server, item, {});
+
+        const info = await (await fetch(`/Items/${id}/PlaybackInfo`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+        })).json();
+        const ms = info.MediaSources[0];
+        const track = (ms.MediaStreams || []).find((st) => st.Type === 'Subtitle');
+        const subRes = track ? await fetch(track.DeliveryUrl) : null;
+        const subBody = subRes ? await subRes.text() : '';
+
+        const font = (ms.MediaAttachments || [])[0];
+        const fontRes = font ? await fetch(font.DeliveryUrl) : null;
+        const fontBytes = fontRes ? (await fontRes.arrayBuffer()).byteLength : 0;
+
+        const encoding = await (await fetch('/System/Configuration/encoding')).json();
+
+        return {
+            storedFormat: (row.subtitles[0] || {}).format,
+            storedCodec: (row.subtitles[0] || {}).codec,
+            exposedCodec: track && track.Codec,
+            deliveryUrl: track && track.DeliveryUrl,
+            subStatus: subRes ? subRes.status : 0,
+            isAss: subBody.trimStart().startsWith('[Script Info]'),
+            attachments: (ms.MediaAttachments || []).length,
+            fontMime: font && font.MimeType,
+            fontStatus: fontRes ? fontRes.status : 0,
+            fontBytes,
+            fallbackFont: encoding.EnableFallbackFont
+        };
+    }, phantomId, ASS_ITEM);
+
+    check('an ASS track is kept as ASS, not converted',
+        ass.storedFormat === 'ass' && ass.isAss && ass.subStatus === 200,
+        `stored ${ass.storedFormat} from ${ass.storedCodec}, served ${ass.subStatus}`);
+    check('the track is reported with the codec that routes it to libass',
+        ass.exposedCodec === 'ass' && /\.ass$/.test(ass.deliveryUrl || ''), ass.exposedCodec);
+    check('the embedded font is downloaded and served',
+        ass.attachments === 1 && ass.fontStatus === 200 && ass.fontBytes > 10000,
+        `${ass.attachments} attachment(s), ${ass.fontMime}, ${ass.fontBytes} bytes`);
+    check('the encoding config answers, so libass actually starts',
+        ass.fallbackFont === false, String(ass.fallbackFont));
+
     // ---- 6c. the offline app shell ---------------------------------------
 
     const manifest = await page.evaluate(async () => {
@@ -482,6 +534,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         const body = await res.json();
         return { status: res.status, version: body.version, files: body.files.length };
     });
+    check('libass ships in the offline app shell',
+        await page.evaluate(async () => {
+            const files = (await (await fetch('/web/precache-manifest.json')).json()).files;
+            return files.some((f) => f.includes('subtitles-octopus-worker.js'))
+                && files.some((f) => f.includes('subtitles-octopus-worker.wasm'));
+        }));
+
     check('the host publishes a precache manifest',
         manifest.status === 200 && manifest.files > 100, `${manifest.files} files, ${manifest.version}`);
 

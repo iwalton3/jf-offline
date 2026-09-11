@@ -102,8 +102,14 @@
         // hands handlers a lower-cased capture, while the downloader writes with
         // Jellyfin's own capitalisation. Two spellings of the same file is a 404
         // on every image with no error anywhere to say so.
-        subtitle: (srv, itemId, sourceId, index) =>
-            ['media', srv, itemId, sourceId, 'subs', index + '.vtt'],
+        // The extension is the subtitle's real format, not always vtt: ASS and SSA
+        // are kept as themselves so jellyfin-web can hand them to libass with their
+        // styling intact. Converting them to WebVTT throws away exactly the
+        // positioning and typesetting that makes them worth having.
+        subtitle: (srv, itemId, sourceId, index, format) =>
+            ['media', srv, itemId, sourceId, 'subs', index + '.' + (format || 'vtt')],
+        attachment: (srv, itemId, sourceId, index) =>
+            ['media', srv, itemId, sourceId, 'attachments', String(index)],
         trickplayTile: (srv, itemId, sourceId, width, index) =>
             ['media', srv, itemId, sourceId, 'trickplay', String(width), index + '.jpg'],
         image: (srv, itemId, type) => ['images', srv, itemId, String(type).toLowerCase()]

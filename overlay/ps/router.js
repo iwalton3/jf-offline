@@ -169,6 +169,20 @@
             LogPath: '', InternalMetadataPath: '', TranscodingTempPath: '',
             HasUpdateAvailable: false, EncoderLocation: 'System', SystemArchitecture: 'X64'
         }))],
+        // htmlVideoPlayer asks for this before it starts libass, and a rejection
+        // here means an ASS track silently never renders. We hold no fallback
+        // fonts, so the answer is no: everything an ASS track needs is either in
+        // its own attachments or already installed on the machine.
+        ['GET', /^\/system\/configuration\/encoding$/, () => json({
+            EnableFallbackFont: false,
+            EnableAudioVbr: true,
+            DownMixAudioBoost: 2,
+            EnableThrottling: false,
+            HardwareAccelerationType: 'none',
+            EncoderPreset: null,
+            EnableTonemapping: false
+        })],
+        ['GET', /^\/system\/configuration\/[a-z0-9_-]+$/, () => json({})],
         ['GET', /^\/system\/endpoint$/, () => json({ IsLocal: true, IsInNetwork: true })],
         ['GET', /^\/branding\/configuration$/, () => json({
             LoginDisclaimer: '', CustomCss: '', SplashscreenEnabled: false
@@ -253,6 +267,10 @@
             (ctx, id, index) => PB.subtitle(ctx, id, parseInt(index, 10))],
         ['GET', new RegExp('^/videos/(' + HEX32 + ')/subtitles/(\\d+)/stream\\.[a-z]+$', 'i'),
             (ctx, id, index) => PB.subtitle(ctx, id, parseInt(index, 10))],
+        // Font attachments, which libass needs to typeset an ASS track the way it
+        // was authored.
+        ['GET', new RegExp('^/videos/(' + HEX32 + ')/' + HEX32 + '/attachments/(\\d+)$', 'i'),
+            (ctx, id, index) => PB.attachment(ctx, id, parseInt(index, 10))],
         ['GET', new RegExp('^/videos/(' + HEX32 + ')/trickplay/(\\d+)/(\\d+)\\.jpg$', 'i'),
             (ctx, id, width, index) => PB.trickplayTile(ctx, id, width, parseInt(index, 10))],
 

@@ -12,11 +12,14 @@
 - Playback of both, through jellyfin-web's own player, with the network off.
 - Play state tracked locally, and pushed into open grids over the socket stand-in.
 - Primary, thumb, logo and one backdrop image per item.
-- **Subtitles.** Every text track is extracted as a switchable WebVTT sidecar.
-  Picture-based tracks (PGS, VobSub, DVB) carry no text, so the settings page asks
-  at sync time whether to burn one into the video — which forces a transcode and
-  fixes the choice for good, and is therefore a decision only the person
-  downloading can make.
+- **Subtitles, in the format they were authored in.** ASS and SSA are kept as
+  themselves and rendered by jellyfin-web's libass, with the fonts embedded in the
+  container downloaded alongside, so styled and typeset subtitles survive even
+  when the video itself had to be transcoded. Other text tracks become WebVTT
+  sidecars. Only picture-based tracks (PGS, VobSub, DVB) have nothing to extract,
+  and for those the settings page asks at sync time whether to burn one in — which
+  forces a transcode and fixes the choice for good, and is therefore a decision
+  only the person downloading can make.
 - **The whole web client held offline**, so airplane mode reaches routes that were
   never visited.
 

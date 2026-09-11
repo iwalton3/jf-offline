@@ -74,6 +74,14 @@ HEADFUL=1 ... node tools/smoke.js   # to watch it
   This cost a day once already: image files were written as `Primary` and read as
   `primary`, and every image 404'd with nothing anywhere saying why.
 
+- **Do not "normalise" subtitles to WebVTT.** ASS and SSA are stored and served
+  as themselves, because `htmlVideoPlayer` routes a track to libass on its
+  reported `Codec` and converting discards the positioning and typesetting that
+  is the entire point of those formats. libass also needs the container's font
+  attachments and a working `GET /System/Configuration/encoding`: that call is
+  awaited before the renderer starts, so a 404 there means an ASS track silently
+  never appears.
+
 ## The schema is shaped for features that do not exist yet
 
 `overlay/ps/schema.js` is the single definition, loaded in both the worker and the
