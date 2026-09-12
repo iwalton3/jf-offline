@@ -2605,9 +2605,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         for (const row of (await listDownloads()).filter((r) => r.itemId === xId)) await removeDownload(row);
         return (await listDownloads()).some((r) => r.itemId === dId && r.state === 'complete');
     }, quiet.id || null, direct.id);
-    const restored = directHeld ? { state: 'complete' } : await download(DIRECT_ITEM);
-    check('DIRECT_ITEM is held again for the offline checks', restored.state === 'complete',
-        restored.error || restored.state);
+    // Through the manager rather than a plain download, so its push marks the
+    // home page stale again: a plain download would leave the page cached without
+    // DIRECT_ITEM for the rest of the minute, for any later check that reads it.
+    const restored = directHeld ? { held: true }
+        : ((await manager(added.serverId)) && await throughManager('download', direct.id));
+    check('DIRECT_ITEM is held again for the offline checks', !!restored && restored.held === true,
+        (restored && restored.error) || JSON.stringify(restored));
 
     // The request jellyfin-web's new-item notification makes for every entry in
     // ItemsAdded (notifications.js). Answered without `ids`, it announced whichever
