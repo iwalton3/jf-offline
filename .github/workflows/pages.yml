@@ -114,14 +114,15 @@ jobs:
             --webroot jellyfin-web/dist \
             --out _bundle \
             --base-path ""
-          (cd _bundle && zip -qr ../jf-offline-bundle.zip .)
-          ls -lh jf-offline-bundle.zip
+          du -sh _bundle
 
       - name: Upload the self-hosting bundle
         uses: actions/upload-artifact@v4
         with:
           name: jf-offline-bundle
-          path: jf-offline-bundle.zip
+          # The directory, not a zip of it: the artifact is already served as a
+          # zip, and zipping here made the download a zip inside a zip.
+          path: _bundle
           retention-days: 30
 
       - uses: actions/upload-pages-artifact@v3
