@@ -34,6 +34,40 @@ const SCROLL_THRESHOLD = ROW_HEIGHT * 6;
 // Taller than a list row: a grid row carries two dropdowns.
 const GRID_ROW_HEIGHT = 44;
 
+/**
+ * Everything the download question owns, and nothing else.
+ *
+ * One definition, used both to seed the component and to clear it, so a field
+ * added here is automatically initialised AND reset. Keeping a separate list of
+ * things to clear is how a cancelled series left its episode grid, its season
+ * list and its subtitle tracks sitting in front of the next one.
+ */
+const askDefaults = () => ({
+    asking: null,
+    askTracks: [],
+    askAudio: [],
+    askChoice: 'auto',
+    askAudioChoice: '',
+    askSeasons: [],
+    askSeasonId: '',
+    askUnwatchedOnly: false,
+    askSummary: '',
+    askTranscode: false,
+    askQuality: '',
+    askPicture: [],
+    askServerWouldBurn: null,
+    askContainer: '',
+    askInconsistent: false,
+    // The per-episode grid. Also the largest thing here by far — one
+    // PlaybackInfo per episode — so leaving it behind wastes memory as well as
+    // showing the wrong show's episodes.
+    gridRows: [],
+    gridChoices: {},
+    gridLoading: false,
+    gridProgress: '',
+    gridUnresolved: 0
+});
+
 const fmtBytes = (n) => {
     if (!n) return '0 B';
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -42,7 +76,7 @@ const fmtBytes = (n) => {
 };
 
 class OfflineSyncManager extends Component {
-    state = {
+    state = Object.assign({
         servers: [],
         serverId: '',
         views: [],
@@ -58,30 +92,9 @@ class OfflineSyncManager extends Component {
         status: '',
         error: '',
         busy: false,
-        // The subtitle question, asked about one item at a time.
-        asking: null,
-        askTracks: [],
-        askAudio: [],
-        askChoice: 'auto',
-        askAudioChoice: '',
-        askSeasons: [],
-        askSeasonId: '',
-        askUnwatchedOnly: false,
-        askSummary: '',
-        askTranscode: false,
-        askQuality: '',
-        askPicture: [],
-        askServerWouldBurn: null,
-        askContainer: '',
-        askInconsistent: false,
-        askNotes: [],
-        // The per-episode grid, opened on demand because it costs one request
-        // per episode against the source server.
-        gridRows: [],
-        gridChoices: {},
-        gridLoading: false,
-        gridProgress: '',
-        gridUnresolved: 0,
+        // Notes from the LAST download, which outlive the question that produced
+        // them: they are a result, not part of what is being asked.
+        notes: [],
         // Which tree nodes are open, by node id.
         expanded: [],
         items_: null,
@@ -89,7 +102,7 @@ class OfflineSyncManager extends Component {
         // Type-to-filter for each list.
         itemFilter: '',
         heldFilter: ''
-    };
+    }, askDefaults());
 
     static styles = /*css*/`
         :host {
@@ -621,6 +634,10 @@ class OfflineSyncManager extends Component {
      */
     start(item) {
         const server = this.server();
+        // Cleared before anything is read, so a question that fails part way
+        // through cannot leave the previous one's answers on screen either.
+        this.resetAsk();
+        this.state.notes = [];
         this.exclusive(`Checking ${item.Name}`, async () => {
             const isSeries = item.Type === 'Series';
             let series = null;
@@ -673,23 +690,26 @@ class OfflineSyncManager extends Component {
     }
 
     confirmAsk() {
+        // Everything is read out before the reset, because the reset is what makes
+        // the next question start clean.
         const item = this.state.asking;
         const choice = this.state.askChoice;
         const audioChoice = this.state.askAudioChoice;
+        const chosenTrack = this.state.askTracks.find((t) => t.index === Number(choice));
         const series = {
             seasonId: this.state.askSeasonId || null,
             unwatchedOnly: this.state.askUnwatchedOnly,
             quality: this.state.askQuality,
             perEpisode: Object.keys(this.state.gridChoices).length ? this.state.gridChoices : null
         };
-        this.closeGrid();
+        this.resetAsk();
         this.state.asking = null;
         let subtitle;
         if (choice === 'auto' || choice === 'none') {
             subtitle = { mode: choice };
         } else {
             const index = Number(choice);
-            const track = this.state.askTracks.find((t) => t.index === index);
+            const track = chosenTrack;
             subtitle = { mode: 'burn', index };
             // For a series the index is meaningless beyond the file it came from,
             // so carry what the track is and let each episode resolve its own.
@@ -728,16 +748,26 @@ class OfflineSyncManager extends Component {
             });
             this.state.gridRows = rows;
             this.state.gridChoices = {};
+            this.state.gridUnresolved = 0;
             this.state.gridProgress = '';
-            this.applyBulk('subbed');
+            // No rule applied on open. Guessing "subbed" at a show that is not
+            // anime resolves nothing and paints every row as a problem, which is
+            // alarming and wrong: the honest starting point is the same one the
+            // download would use anyway, which is to burn nothing in.
         });
         this.state.gridLoading = false;
+    }
+
+    /** Put the question back to nothing. Every entry and exit goes through here. */
+    resetAsk() {
+        Object.assign(this.state, askDefaults());
     }
 
     closeGrid() {
         this.state.gridRows = [];
         this.state.gridChoices = {};
         this.state.gridUnresolved = 0;
+        this.state.gridProgress = '';
     }
 
     applyBulk(mode, opts) {
@@ -813,7 +843,7 @@ class OfflineSyncManager extends Component {
     }
 
     cancelAsk() {
-        this.state.asking = null;
+        this.resetAsk();
     }
 
     onAskChange(ev) {
@@ -850,7 +880,7 @@ class OfflineSyncManager extends Component {
                     this.state.error = `${result.failures.length} of ${result.episodes} episodes failed: `
                         + result.failures.map((f) => f.name).join(', ');
                 }
-                this.state.askNotes = result.notes || [];
+                this.state.notes = result.notes || [];
             } else {
                 await downloadItem(server, item, {
                     subtitle, audioStreamIndex, onProgress, quality: series.quality
@@ -1079,10 +1109,10 @@ class OfflineSyncManager extends Component {
                     </div>
                 `)}
 
-                ${when(s.askNotes.length > 0, () => html`
+                ${when(s.notes.length > 0, () => html`
                     <div class="warn">
-                        <strong>${s.askNotes.length} episode(s) could not use the subtitle track you chose.</strong>
-                        ${s.askNotes.slice(0, 6).map((n) => n.name).join(', ')}${s.askNotes.length > 6 ? '…' : ''}
+                        <strong>${s.notes.length} episode(s) could not use the subtitle track you chose.</strong>
+                        ${s.notes.slice(0, 6).map((n) => n.name).join(', ')}${s.notes.length > 6 ? '…' : ''}
                     </div>
                 `)}
 

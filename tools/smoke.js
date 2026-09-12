@@ -1231,6 +1231,96 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         const buttons = [...root.querySelectorAll('.item button.act')];
         return { count: buttons.length, disabled: buttons.filter((b) => b.disabled).length };
     });
+    // The reported leak: cancel out of one series and the next one inherited its
+    // grid, its seasons and its subtitle tracks.
+    const leak = await page.evaluate(async (bigId, smallId) => {
+        const el = document.querySelector('offline-sync-manager');
+        if (!el) return { error: 'settings page did not mount' };
+        const wait = async (fn, ms = 30000) => {
+            const end = Date.now() + ms;
+            while (Date.now() < end) {
+                if (fn()) return true;
+                await new Promise((r) => setTimeout(r, 150));
+            }
+            return false;
+        };
+        const byId = async (id) => {
+            const { knownServers, SourceServer } = await import('/web/plugin/source.js');
+            const server = new SourceServer(knownServers(window.PS_SCHEMA.ID.SERVER)[0]);
+            return server.item(id);
+        };
+
+        el.state.serverId = el.state.servers[0].id;
+
+        const big = await byId(bigId);
+        el.start(big);
+        if (!await wait(() => el.state.asking && el.state.asking.Id === bigId)) return { error: 'first ask never opened' };
+        const bigSeasons = el.state.askSeasons.length;
+
+        el.openGrid();
+        if (!await wait(() => el.state.gridRows.length > 0)) return { error: 'grid never filled' };
+        const gridRows = el.state.gridRows.length;
+        const gridChoices = Object.keys(el.state.gridChoices).length;
+        const openedClean = el.state.gridUnresolved === 0 && gridChoices === 0;
+        // Two halves of the contract, on real files: a rule that fits every
+        // episode fills the grid, and one that fits none leaves them all marked
+        // for a person rather than guessing.
+        const withSubtitles = el.state.gridRows.filter((r) => r.subtitles.length).length;
+        el.applyBulk('none');
+        const afterFitting = Object.keys(el.state.gridChoices).length;
+        const unresolvedAfterFitting = el.state.gridUnresolved;
+        el.state.gridChoices = {};
+        el.applyBulk('track', { ordinal: 0 });
+        const afterUnfitting = Object.keys(el.state.gridChoices).length;
+        const unresolvedAfterUnfitting = el.state.gridUnresolved;
+        el.state.gridChoices = {};
+
+        el.cancelAsk();
+        const afterCancel = {
+            asking: el.state.asking,
+            gridRows: el.state.gridRows.length,
+            gridChoices: Object.keys(el.state.gridChoices).length,
+            seasons: el.state.askSeasons.length,
+            tracks: el.state.askTracks.length,
+            quality: el.state.askQuality
+        };
+
+        const small = await byId(smallId);
+        el.start(small);
+        if (!await wait(() => el.state.asking && el.state.asking.Id === smallId)) return { error: 'second ask never opened' };
+        const second = {
+            gridRows: el.state.gridRows.length,
+            gridChoices: Object.keys(el.state.gridChoices).length,
+            seasons: el.state.askSeasons.length
+        };
+        el.cancelAsk();
+        return { bigSeasons, gridRows, gridChoices, openedClean, withSubtitles,
+            afterFitting, unresolvedAfterFitting, afterUnfitting, unresolvedAfterUnfitting,
+            afterCancel, second };
+    }, MULTI_SEASON_SERIES, SMALL_SERIES);
+
+    check('the per-episode grid fills for the series being asked about',
+        !leak.error && leak.gridRows > 0 && leak.openedClean,
+        leak.error || `${leak.gridRows} episodes, nothing presumed`);
+    check('a bulk rule that fits fills the whole grid',
+        !leak.error && leak.afterFitting === leak.gridRows && leak.unresolvedAfterFitting === 0,
+        leak.error || `${leak.afterFitting} of ${leak.gridRows} set`);
+    check('a bulk rule that fits nothing marks every row instead of guessing',
+        !leak.error && (leak.withSubtitles > 0
+            ? leak.afterUnfitting === leak.withSubtitles
+            : leak.afterUnfitting === 0 && leak.unresolvedAfterUnfitting === leak.gridRows),
+        leak.error || `${leak.withSubtitles} episodes have subtitles, ${leak.afterUnfitting} set, `
+            + `${leak.unresolvedAfterUnfitting} left for a person`);
+    check('cancelling the question clears everything it owned',
+        !leak.error && leak.afterCancel.asking === null && leak.afterCancel.gridRows === 0
+            && leak.afterCancel.gridChoices === 0 && leak.afterCancel.seasons === 0
+            && leak.afterCancel.tracks === 0,
+        leak.error || JSON.stringify(leak.afterCancel));
+    check('the next series does not inherit the cancelled one',
+        !leak.error && leak.second.gridRows === 0 && leak.second.gridChoices === 0
+            && leak.second.seasons < leak.bigSeasons,
+        leak.error || `${leak.second.seasons} seasons vs the previous ${leak.bigSeasons}, grid ${leak.second.gridRows}`);
+
     check('rows keep working buttons after a busy render',
         rowState.count > 0 && rowState.disabled === 0,
         `${rowState.disabled} of ${rowState.count} disabled`);

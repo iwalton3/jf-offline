@@ -139,6 +139,13 @@ HEADFUL=1 ... node tools/smoke.js   # to watch it
   element can scroll at all, or a list shorter than its box reports zero remaining
   on every wheel event and asks for the next page each time.
 
+- **The download question has one definition, `askDefaults()`, used to seed the
+  component AND to clear it.** A field added there is automatically initialised
+  and reset. Keeping a separate list of things to clear is exactly how a
+  cancelled series left its sixty-episode grid, its seasons and its tracks
+  sitting in front of the next one. Anything that is a *result* rather than part
+  of the question — the per-episode notes — lives outside it on purpose.
+
 ## The schema is shaped for features that do not exist yet
 
 `overlay/ps/schema.js` is the single definition, loaded in both the worker and the
