@@ -23,35 +23,19 @@
     /**
      * Announce changed user data the way a real server does.
      *
-     * The parent is included alongside the item because jellyfin-web refreshes a
-     * container's own indicators from this list, and an episode finishing should
-     * update the series card it sits under.
+     * The entries come from the library rather than being built here, so a card
+     * refreshed by this push and the same card refreshed by a fetch cannot
+     * disagree. What a parent entry may contain was measured against a real
+     * 12.0.0 with tools/userdata-probe.py and is written up in SCOPE.md; the
+     * one deliberate divergence is that the real server pushes a single
+     * ancestor and this pushes every one it holds, because the phantom has no
+     * other way to refresh a Series card and jellyfin-web applies each entry to
+     * the card whose data-id matches it.
      */
-    async function userDataChanged(itemId, ud, dto) {
-        const entry = {
-            ItemId: itemId,
-            Key: itemId,
-            Played: !!ud.played,
-            PlaybackPositionTicks: ud.positionTicks || 0,
-            PlayCount: ud.playCount || 0,
-            IsFavorite: !!ud.isFavorite,
-            LastPlayedDate: ud.lastPlayedDate || undefined,
-            PlayedPercentage: ud.positionTicks && dto && dto.RunTimeTicks
-                ? Math.min(100, (ud.positionTicks / dto.RunTimeTicks) * 100)
-                : undefined
-        };
-        // Every parent, not the first one found. An episode DTO always carries a
-        // SeasonId, so `SeasonId || SeriesId` never reached the series — and the
-        // cards a person is actually looking at, on the home screen and in Next
-        // Up and in search, are Series cards. Finishing an episode left the show
-        // it belongs to showing its old watched state until a reload.
-        const list = [entry];
-        const seen = new Set([itemId]);
-        for (const parentId of [dto && dto.SeasonId, dto && dto.SeriesId, dto && dto.ParentId]) {
-            if (!parentId || seen.has(parentId)) continue;
-            seen.add(parentId);
-            list.push(Object.assign({}, entry, { ItemId: parentId, Key: parentId }));
-        }
+    async function userDataChanged(itemId, dto) {
+        const list = await g.PS_LIBRARY.userDataEntries(
+            [itemId, dto && dto.SeasonId, dto && dto.SeriesId, dto && dto.ParentId]);
+        if (!list.length) return;
 
         await broadcast({
             MessageType: 'UserDataChanged',

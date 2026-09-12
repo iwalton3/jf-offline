@@ -37,12 +37,22 @@
         const [all, ud] = await Promise.all([DB.all('items'), DB.all('userdata')]);
         const udMap = new Map(ud.map((u) => [u.srv + ':' + u.itemId, u]));
 
+        // Played is counted here beside the total, because a container's counts
+        // and its user data are the same question asked twice and answering them
+        // in two places is how the series card came to show a count from the
+        // source server over the episodes actually on disk.
         const heldCount = new Map();
-        const bump = (id) => { if (id) heldCount.set(id, (heldCount.get(id) || 0) + 1); };
+        const playedCount = new Map();
+        const bump = (map, id) => { if (id) map.set(id, (map.get(id) || 0) + 1); };
         for (const row of all) {
             if (row.dto.Type !== 'Episode') continue;
-            bump(row.dto.SeasonId);
-            bump(row.dto.SeriesId);
+            bump(heldCount, row.dto.SeasonId);
+            bump(heldCount, row.dto.SeriesId);
+            const ud = udMap.get(row.srv + ':' + row.id);
+            if (ud && ud.played) {
+                bump(playedCount, row.dto.SeasonId);
+                bump(playedCount, row.dto.SeriesId);
+            }
         }
 
         const rows = all.filter((row) => {
@@ -50,9 +60,76 @@
             if (type !== 'Series' && type !== 'Season') return true;
             return (heldCount.get(row.id) || 0) > 0;
         });
-        for (const row of rows) row.heldCount = heldCount.get(row.id);
+        for (const row of rows) {
+            if (!heldCount.has(row.id)) continue;
+            row.held = { total: heldCount.get(row.id), played: playedCount.get(row.id) || 0 };
+        }
 
         return { rows, udMap };
+    }
+
+    /**
+     * The user data for one held item, as jellyfin-web should see it.
+     *
+     * ONE definition, and the reason is that there were three: the REST read
+     * merged the source server's object, the socket push built its own, and the
+     * mark-played response built a third. They disagreed in both directions —
+     * the push gave a series the episode's Played flag and date, and the read
+     * gave the same series the source's UnplayedItemCount over the episodes
+     * actually held.
+     *
+     * `held` is present for a container and absent for a file. Measured against
+     * a real 12.0.0 with tools/userdata-probe.py: a container's entry carries
+     * counts over its own children and never a child's played flag, position,
+     * play count or date. Nothing here is spread in from the stored DTO, because
+     * that is where the source server's counts came in.
+     */
+    function userDataOf(dto, ud, held) {
+        const entry = {
+            ItemId: dto.Id,
+            Key: dto.Id,
+            Played: false,
+            PlaybackPositionTicks: 0,
+            PlayCount: 0,
+            IsFavorite: !!(ud && ud.isFavorite)
+        };
+        if (held) {
+            entry.Played = held.total > 0 && held.played === held.total;
+            entry.UnplayedItemCount = held.total - held.played;
+            entry.PlayedPercentage = held.total ? (held.played / held.total) * 100 : 0;
+            return entry;
+        }
+        if (!ud) return entry;
+        entry.Played = !!ud.played;
+        entry.PlaybackPositionTicks = ud.positionTicks || 0;
+        entry.PlayCount = ud.playCount || 0;
+        entry.LastPlayedDate = ud.lastPlayedDate || undefined;
+        entry.PlayedPercentage = ud.positionTicks && dto.RunTimeTicks
+            ? Math.min(100, (ud.positionTicks / dto.RunTimeTicks) * 100)
+            : undefined;
+        return entry;
+    }
+
+    /**
+     * User-data entries for these ids, skipping any this library does not hold.
+     *
+     * The socket push and the mark-played response both come through here, so
+     * neither can describe an item differently from the way the same item reads
+     * over REST.
+     */
+    async function userDataEntries(ids) {
+        const { rows, udMap } = await loadAll();
+        const byId = new Map(rows.map((row) => [row.id, row]));
+        const out = [];
+        const seen = new Set();
+        for (const id of ids) {
+            if (!id || seen.has(id)) continue;
+            seen.add(id);
+            const row = byId.get(id);
+            if (!row) continue;
+            out.push(userDataOf(row.dto, udMap.get(row.srv + ':' + row.id), row.held));
+        }
+        return out;
     }
 
     /**
@@ -75,7 +152,8 @@
 
     /** A stored row as jellyfin-web should see it: our server, our parents, live user data. */
     function present(row, udMap) {
-        const dto = DB.mergeUserData(row.dto, udMap.get(row.srv + ':' + row.id));
+        const dto = Object.assign({}, row.dto);
+        dto.UserData = userDataOf(row.dto, udMap.get(row.srv + ':' + row.id), row.held);
         dto.ServerId = S.ID.SERVER;
         dto.ParentId = parentKeyOf(row.dto);
         // Everything we hold is playable; the source server's own flags described a
@@ -85,9 +163,9 @@
         // Counts describe what is here, not what the source server has. A show
         // page saying "24 episodes" over the three that were downloaded is a
         // worse answer than no number at all.
-        if (row.heldCount != null) {
-            dto.ChildCount = row.heldCount;
-            dto.RecursiveItemCount = row.heldCount;
+        if (row.held) {
+            dto.ChildCount = row.held.total;
+            dto.RecursiveItemCount = row.held.total;
         }
         return dto;
     }
@@ -447,7 +525,7 @@
     }
 
     g.PS_LIBRARY = {
-        loadAll, present, parentKeyOf, queryItems, viewDto,
+        loadAll, present, parentKeyOf, queryItems, viewDto, userDataOf, userDataEntries,
         userViews, items, itemById, latest, resume, nextUp, seasons, episodes, ancestors, image,
         searchHints, rankSearch,
         emptyList

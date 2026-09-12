@@ -84,22 +84,6 @@
         return (await get('userdata', [srv, itemId])) || null;
     }
 
-    /** Merge user data into a DTO copy. Never mutates the stored item. */
-    function mergeUserData(dto, ud) {
-        const out = Object.assign({}, dto);
-        out.UserData = Object.assign({}, dto.UserData, ud ? {
-            Played: !!ud.played,
-            PlaybackPositionTicks: ud.positionTicks || 0,
-            PlayCount: ud.playCount || 0,
-            LastPlayedDate: ud.lastPlayedDate || undefined,
-            IsFavorite: !!ud.isFavorite,
-            PlayedPercentage: ud.positionTicks && dto.RunTimeTicks
-                ? Math.min(100, (ud.positionTicks / dto.RunTimeTicks) * 100)
-                : undefined
-        } : {});
-        return out;
-    }
-
     /** Append an outbound operation. Nothing drains this in v0, by design. */
     function journal(op, srv, itemId, payload) {
         return put('journal', {
@@ -109,5 +93,5 @@
         });
     }
 
-    g.PS_DB = { open, tx, wrap, get, put, del, all, allByIndex, putMany, meta, getUserData, mergeUserData, journal };
+    g.PS_DB = { open, tx, wrap, get, put, del, all, allByIndex, putMany, meta, getUserData, journal };
 })(self);

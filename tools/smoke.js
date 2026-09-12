@@ -37,6 +37,10 @@ const REENCODE_ITEM = process.env.JF_REENCODE_ITEM || '0a7fa7476a1ee92a53e895d46
 const MULTI_SEASON_SERIES = process.env.JF_SERIES || '2f9ea3e079631ea97fae6ebadb569063';
 // One season, one episode: cheap to hold so later checks have a real series.
 const SMALL_SERIES = process.env.JF_SMALL_SERIES || '5b12d67700af1f19b8764804c7788343';
+// Six episodes of 73 KB in one real season folder. Multi-episode matters: a
+// parent entry copied from its child is indistinguishable from a correct one
+// when the parent has exactly one child.
+const PARENT_SERIES = process.env.JF_PARENT_SERIES || 'a55eda8ece2cbb424daaadd6cdbb8960';
 // Accounts whose Jellyfin policy withholds one of the two permissions a
 // download needs, so the gate is tested against a real refusal.
 const NO_DOWNLOAD_USER = process.env.JF_NODL_USER || 'qa-nodownload';
@@ -1899,39 +1903,89 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     check('the shimmed socket opens and stays open', socket.opened === true && socket.state === 1);
     check('play state is pushed over the shimmed socket', socket.message === 'UserDataChanged', String(socket.message));
 
-    // An episode finishing has to refresh the series card, because a Series card
-    // is what the home screen, Next Up and search actually draw. Every episode
-    // DTO carries a SeasonId, so picking the first parent found always picked the
-    // season and the series was never told.
-    const parents = await page.evaluate(async () => {
-        // Whichever episode the suite happens to be holding by now, rather than a
-        // fixture id that may have been removed by an earlier check.
-        const held = await (await fetch('/Items?Recursive=true&IncludeItemTypes=Episode')).json();
-        const episodeId = (held.Items || []).length ? held.Items[0].Id : null;
-        if (!episodeId) return { skipped: true };
+    // A parent entry describes the parent, not the episode that moved.
+    //
+    // Measured against a real 12.0.0 with tools/userdata-probe.py: the server
+    // pushes the episode and ONE ancestor, and that ancestor's entry carries
+    // Played false, PlayCount 0, no LastPlayedDate, and a PlayedPercentage and
+    // UnplayedItemCount counted over its children. The fixture is held by this
+    // check rather than borrowed, and only half of it is held, so a count taken
+    // from the source server rather than from what is on disk is visible.
+    const parents = await page.evaluate(async (pid, seriesId) => {
+        const { knownServers, SourceServer } = await import('/web/plugin/source.js');
+        const { downloadSeries, removeDownload, listDownloads } = await import('/web/plugin/downloader.js');
+        const server = new SourceServer(knownServers(pid)[0]);
+        const dto = await server.item(seriesId);
+        await downloadSeries(server, dto, {});
+
+        const mine = () => window.PS_DB.all('items').then((rows) => rows
+            .filter((r) => r.dto.Type === 'Episode' && r.dto.SeriesId === seriesId));
+        const downloaded = await mine();
+        // Half of them go straight back out, so held and source disagree.
+        const drop = new Set(downloaded.slice(Math.ceil(downloaded.length / 2)).map((r) => r.id));
+        for (const row of (await listDownloads()).filter((r) => drop.has(r.itemId))) {
+            await removeDownload(row);
+        }
+        const held = await mine();
+        const episodeId = held.length ? held[0].id : null;
 
         const ws = new WebSocket(location.origin.replace('http', 'ws') + '/socket?ApiKey=x');
         await new Promise((res) => { ws.onopen = () => res(); setTimeout(res, 2000); });
         const got = new Promise((res) => {
             ws.onmessage = (e) => {
                 const msg = JSON.parse(e.data);
-                if (msg.MessageType === 'UserDataChanged') res(msg.Data.UserDataList.map((u) => u.ItemId));
+                if (msg.MessageType === 'UserDataChanged') res(msg.Data.UserDataList);
             };
             setTimeout(() => res(null), 5000);
         });
         await fetch('/UserPlayedItems/' + episodeId, { method: 'POST' });
-        const ids = await got;
-        const dto = await (await fetch('/Items/' + episodeId)).json();
-        return { ids, seasonId: dto.SeasonId, seriesId: dto.SeriesId };
-    });
+        const list = await got;
+        const seriesRest = await (await fetch('/Items/' + seriesId)).json();
 
-    check('finishing an episode tells the season AND the series',
-        parents.skipped || (!!parents.ids && !!parents.seriesId
-            && parents.ids.includes(parents.seasonId) && parents.ids.includes(parents.seriesId)),
-        parents.skipped ? 'no episodes held'
-            : (parents.ids
-                ? `pushed ${parents.ids.length}, series ${parents.ids.includes(parents.seriesId)}`
-                : 'no message arrived'));
+        const cleanup = (await listDownloads()).filter((r) => held.some((h) => h.id === r.itemId));
+        for (const row of cleanup) await removeDownload(row);
+
+        return {
+            heldCount: held.length,
+            sourceCount: downloaded.length,
+            episodeId,
+            entries: list,
+            seriesUserData: seriesRest.UserData || null
+        };
+    }, phantomId, PARENT_SERIES);
+
+    // Loud rather than skipped. The check this replaces returned `skipped` when
+    // nothing was held and passed on it, which is the state it was least able to
+    // survive: a vacuous pass over the exact defect it was written for.
+    check('a multi-episode series is held for the parent-entry check',
+        parents.heldCount >= 2 && parents.heldCount < parents.sourceCount,
+        `held ${parents.heldCount} of ${parents.sourceCount} downloaded`);
+
+    const parentEntries = (parents.entries || []).filter((u) => u.ItemId !== parents.episodeId);
+    const carriesEpisodeState = parentEntries.filter((u) => u.Played || u.LastPlayedDate
+        || u.PlayCount > 0 || u.PlaybackPositionTicks > 0);
+    check('a parent entry does not carry the episode\'s played state',
+        parentEntries.length > 0 && carriesEpisodeState.length === 0,
+        parentEntries.length
+            ? `${carriesEpisodeState.length} of ${parentEntries.length} parent entries do: `
+              + JSON.stringify(carriesEpisodeState[0] || null)
+            : 'no parent entry was pushed at all');
+
+    // One of `heldCount` episodes is played, so these are the only two answers
+    // that describe the parent rather than the child.
+    const wantUnplayed = parents.heldCount - 1;
+    const wantPercent = (1 / parents.heldCount) * 100;
+    const counted = parentEntries.filter((u) => u.UnplayedItemCount === wantUnplayed
+        && Math.abs((u.PlayedPercentage || 0) - wantPercent) < 0.01);
+    check('a parent entry counts its own held children',
+        parentEntries.length > 0 && counted.length === parentEntries.length,
+        `want UnplayedItemCount ${wantUnplayed} and PlayedPercentage ${wantPercent.toFixed(1)}, got `
+        + JSON.stringify(parentEntries.map((u) => [u.UnplayedItemCount, u.PlayedPercentage])));
+
+    check('a served series counts the episodes held, not the ones the source has',
+        !!parents.seriesUserData && parents.seriesUserData.UnplayedItemCount === wantUnplayed,
+        `UnplayedItemCount ${parents.seriesUserData && parents.seriesUserData.UnplayedItemCount}`
+        + ` over ${parents.heldCount} held, source has ${parents.sourceCount}`);
 
     // ---- 10. offline ------------------------------------------------------
 

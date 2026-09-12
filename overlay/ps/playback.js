@@ -326,7 +326,7 @@
             await DB.journal(opts.stopped ? 'stopped' : (opts.started ? 'started' : 'progress'), row.srv, itemId, {
                 positionTicks: next.positionTicks, played: next.played
             });
-            await g.PS_NOTIFY.userDataChanged(itemId, next, row.dto);
+            await g.PS_NOTIFY.userDataChanged(itemId, row.dto);
         }
         return noContent();
     }
@@ -342,44 +342,35 @@
         const row = await findItem(itemId);
         if (!row) return notFound('item ' + itemId);
         const existing = await DB.getUserData(row.srv, itemId);
-        const next = await writeUserData(row.srv, itemId, {
+        await writeUserData(row.srv, itemId, {
             played,
             positionTicks: 0,
             playCount: played ? Math.max(1, (existing && existing.playCount) || 0) : 0,
             lastPlayedDate: played ? new Date().toISOString() : null
         }, S.SET_BY.EXPLICIT);
         await DB.journal('played', row.srv, itemId, { played });
-        await g.PS_NOTIFY.userDataChanged(itemId, next, row.dto);
-        return json(toUserDataDto(next, row.dto));
+        await g.PS_NOTIFY.userDataChanged(itemId, row.dto);
+        return json(await userDataReply(itemId));
     }
 
     async function setFavorite(ctx, itemId, isFavorite) {
         const row = await findItem(itemId);
         if (!row) return notFound('item ' + itemId);
-        const next = await writeUserData(row.srv, itemId, { isFavorite }, S.SET_BY.EXPLICIT);
+        await writeUserData(row.srv, itemId, { isFavorite }, S.SET_BY.EXPLICIT);
         await DB.journal('favorite', row.srv, itemId, { isFavorite });
-        await g.PS_NOTIFY.userDataChanged(itemId, next, row.dto);
-        return json(toUserDataDto(next, row.dto));
+        await g.PS_NOTIFY.userDataChanged(itemId, row.dto);
+        return json(await userDataReply(itemId));
     }
 
-    function toUserDataDto(ud, dto) {
-        return {
-            Played: !!ud.played,
-            PlaybackPositionTicks: ud.positionTicks || 0,
-            PlayCount: ud.playCount || 0,
-            IsFavorite: !!ud.isFavorite,
-            LastPlayedDate: ud.lastPlayedDate || undefined,
-            ItemId: ud.itemId,
-            Key: ud.itemId,
-            PlayedPercentage: ud.positionTicks && dto && dto.RunTimeTicks
-                ? Math.min(100, (ud.positionTicks / dto.RunTimeTicks) * 100)
-                : undefined
-        };
+    /** The item's user data as the library would serve it, for a write's reply. */
+    async function userDataReply(itemId) {
+        const [entry] = await g.PS_LIBRARY.userDataEntries([itemId]);
+        return entry;
     }
 
     g.PS_PLAYBACK = {
         playbackInfo, stream, hlsPlaylist, hlsSegment, subtitle, attachment, trickplayTile,
-        reportProgress, setPlayed, setFavorite, toUserDataDto,
+        reportProgress, setPlayed, setFavorite,
         findDownload, findItem
     };
 })(self);
