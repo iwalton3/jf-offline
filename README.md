@@ -1,6 +1,6 @@
 # Experimental Offline Sync for Jellyfin Web
 
-This is an experimental Jellyfin-Web build with Offline Sync added.  
+This is an experimental Jellyfin-Web build with Offline Sync added.
 Note: If you want a fully-featured desktop client with offline sync, use [MPV Shim v3](https://github.com/jellyfin/jellyfin-mpv-shim), not this experiment.
 
 ![Screenshot](https://raw.githubusercontent.com/iwalton3/mpv-shim-misc-docs/bd8dff4530edf41881136a6ac482e19e0ee26f02/images/jf-offline.png)
@@ -8,6 +8,7 @@ Note: If you want a fully-featured desktop client with offline sync, use [MPV Sh
 [Try it out here](https://iwalton3.github.io/jf-offline/) or [Download](https://nightly.link/iwalton3/jf-offline/workflows/pages/main/jf-offline-bundle.zip)
 
 Quick start:
+- To use the webclient bundle, download it and unzip it, then use a server like `python -m http.server` to host it. This is required if the server you wish to test with doesn't support https.
 - To download files, use the "Sync Offline" option on media items.
 - To manage downloads, use the "Manage Downloads" user menu option.
 - To switch to the offline catalog, use the "Select Server" user menu option.
