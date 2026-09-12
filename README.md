@@ -2,9 +2,9 @@
 
 This is an experimental Jellyfin-Web build with Offline Sync added.
 
-![Screenshot](https://raw.githubusercontent.com/iwalton3/mpv-shim-misc-docs/refs/heads/master/images/jf-offline.png)
+![Screenshot](https://raw.githubusercontent.com/iwalton3/mpv-shim-misc-docs/bd8dff4530edf41881136a6ac482e19e0ee26f02/images/jf-offline.png)
 
-[Try it out here.](https://iwalton3.github.io/jf-offline/) or [Download](https://nightly.link/iwalton3/jf-offline/workflows/pages/main/jf-offline-bundle.zip)
+[Try it out here](https://iwalton3.github.io/jf-offline/) or [Download](https://nightly.link/iwalton3/jf-offline/workflows/pages/main/jf-offline-bundle.zip)
 
 Quick start:
 - To download files, use the "Sync Offline" option on media items.
