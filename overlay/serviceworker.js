@@ -404,7 +404,7 @@ if (IS_SERVICE_WORKER) {
             return;
         }
         if (data.kind === 'library-changed') {
-            event.waitUntil(self.PS_NOTIFY.libraryChanged());
+            event.waitUntil(self.PS_NOTIFY.libraryChanged(data.change));
             return;
         }
         if (data.kind === 'precache') {

@@ -659,7 +659,7 @@ class OfflineSyncManager extends Component {
         this.exclusive(`Removing ${label}`, async () => {
             for (const row of rows) await removeDownload(row);
             await this.refreshDownloads();
-            await window.__phantom.libraryChanged();
+            await window.__phantom.libraryChanged({ removed: rows.map((r) => ({ id: r.itemId, type: r.type })) });
         });
     }
 
@@ -1046,7 +1046,7 @@ class OfflineSyncManager extends Component {
                 });
             }
             await this.refreshDownloads();
-            await window.__phantom.libraryChanged();
+            await window.__phantom.libraryChanged({ added: [{ id: item.Id, type: item.Type }] });
         });
     }
 
@@ -1054,7 +1054,7 @@ class OfflineSyncManager extends Component {
         this.exclusive(`Removing ${row.name || row.itemId}`, async () => {
             await removeDownload(row);
             await this.refreshDownloads();
-            await window.__phantom.libraryChanged();
+            await window.__phantom.libraryChanged({ removed: [{ id: row.itemId, type: row.type }] });
         });
     }
 

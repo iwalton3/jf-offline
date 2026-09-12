@@ -237,7 +237,8 @@
         db: g.PS_DB,
         opfs: g.PS_OPFS,
         socketsOpen: () => live.size,
-        libraryChanged: () => tellWorker('library-changed'),
+        // `change` crosses postMessage, so it must be plain: a vdx Proxy does not clone.
+        libraryChanged: (change) => tellWorker('library-changed', { change }),
         precache,
         onPrecache: (fn) => {
             precache.listeners.add(fn);

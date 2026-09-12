@@ -51,10 +51,33 @@
         }
     }
 
-    async function libraryChanged() {
+    /**
+     * Announce a download or a removal, as `{ added, removed }` lists of `{ id, type }`.
+     *
+     * jellyfin-web drops a LibraryChanged whose ItemsAdded and ItemsRemoved are
+     * both empty, and a grid bound to a library refreshes only when one of the
+     * folder lists names it. The push alone cannot refresh the home page — see
+     * invalidateAppQueries in ps-bootstrap.js — but its shape should still be
+     * the server's. ItemsAdded is fetched by the app's new-item notification, so
+     * `/Items` has to honour `ids` for this to announce the right thing.
+     */
+    async function libraryChanged(change) {
+        const added = (change && change.added) || [];
+        const removed = (change && change.removed) || [];
+        const libraryOf = (entry) => entry.type === 'Movie' ? S.ID.VIEW_MOVIES : S.ID.VIEW_SHOWS;
+        const addedTo = [...new Set(added.map(libraryOf))];
+        const removedFrom = [...new Set(removed.map(libraryOf))];
         await broadcast({
             MessageType: 'LibraryChanged',
-            Data: { ItemsAdded: [], ItemsRemoved: [], ItemsUpdated: [], CollectionFolders: [] }
+            Data: {
+                FoldersAddedTo: addedTo,
+                FoldersRemovedFrom: removedFrom,
+                ItemsAdded: added.map((e) => e.id),
+                ItemsRemoved: removed.map((e) => e.id),
+                ItemsUpdated: [],
+                CollectionFolders: [...new Set(addedTo.concat(removedFrom))],
+                IsEmpty: !added.length && !removed.length
+            }
         });
     }
 
