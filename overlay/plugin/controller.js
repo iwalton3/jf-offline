@@ -19,7 +19,7 @@ import '/web/plugin/vdx/ui/data/virtual-list.js';
 import { knownServers, SourceServer } from '/web/plugin/source.js';
 import {
     downloadItem, downloadSeries, removeDownload, listDownloads,
-    ensurePersistentStorage, inspectSubtitles, inspectSeries
+    ensurePersistentStorage, inspectSubtitles, inspectSeries, cancelDownload, cancelAll
 } from '/web/plugin/downloader.js';
 
 // One request per automatic top-up, which happens when the list is
@@ -65,6 +65,15 @@ class OfflineSyncManager extends Component {
         askSeasonId: '',
         askUnwatchedOnly: false,
         askSummary: '',
+        askTranscode: false,
+        askQuality: '',
+        askPicture: [],
+        askServerWouldBurn: null,
+        askContainer: '',
+        // Which tree nodes are open, by node id.
+        expanded: [],
+        items_: null,
+        downloading: null,
         // Type-to-filter for each list.
         itemFilter: '',
         heldFilter: ''
@@ -98,7 +107,9 @@ class OfflineSyncManager extends Component {
 
         .osx { display: flex; flex-direction: column; gap: 1.5em; }
         .row { display: flex; flex-wrap: wrap; gap: .75em; align-items: flex-end; }
-        .field { display: flex; flex-direction: column; gap: .35em; min-width: 16em; flex: 1 1 16em; }
+        /* No flex-grow. Growing to fill the row spread two dropdowns across the
+           whole width with a chasm between them; they want to be their own size. */
+        .field { display: flex; flex-direction: column; gap: .35em; width: 18em; max-width: 100%; }
         .field > label {
             font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
             color: var(--text-muted);
@@ -131,10 +142,15 @@ class OfflineSyncManager extends Component {
 
         .item {
             display: flex; align-items: center; gap: .75em;
+            /* The virtual list positions each row in a box of its own; without a
+               full width the row shrinks to its content and the button sits
+               wherever the text ends instead of at the right edge. */
+            width: 100%;
             height: ${ROW_HEIGHT}px;
             padding: 0 .85em;
             border-bottom: 1px solid var(--border-color);
             box-sizing: border-box;
+            overflow: hidden;
         }
         .item:last-child { border-bottom: none; }
         /* The name takes the slack and truncates; min-width:0 is what lets a flex
@@ -158,8 +174,10 @@ class OfflineSyncManager extends Component {
         @media (max-width: 640px) {
             .item { gap: .5em; padding: 0 .6em; }
             .item .tag { display: none; }
-            .item .tag.keep { display: inline; }
-            button.act { min-width: 0; padding: .35em .7em; }
+            .item .tag.keep { display: inline; max-width: 7em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+            button.act { min-width: 0; padding: .35em .6em; }
+            .field { width: 100%; }
+            .row { gap: .5em; }
         }
 
         input.filter {
@@ -208,6 +226,25 @@ class OfflineSyncManager extends Component {
         .check { display: flex; align-items: center; gap: .5em; font-size: 13px; cursor: pointer; }
         .check input { accent-color: var(--primary-color); width: 1em; height: 1em; }
 
+        .caret {
+            flex: none; width: 1.1em; text-align: center;
+            color: var(--text-muted); font-size: 11px;
+            transition: transform .12s ease;
+        }
+        .caret.open { transform: rotate(90deg); }
+        .caret.leaf { opacity: 0; }
+        .node-group .name { font-weight: 600; }
+        @media (prefers-reduced-motion: reduce) { .caret { transition: none; } }
+
+        .warn {
+            border-left: 3px solid var(--warning, #d4b846);
+            padding: .5em .75em;
+            background: rgba(212, 184, 70, .08);
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+        .warn strong { color: #d4b846; font-weight: 600; }
+
         .ask {
             border: 1px solid var(--primary-color);
             background: var(--card-bg);
@@ -250,15 +287,23 @@ class OfflineSyncManager extends Component {
         const rows = await listDownloads();
         this.state.downloads = rows.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
         this.state.held = rows.map((r) => r.itemId);
+        // The rows say what is held; the item store says what it belongs to. The
+        // tree needs both, and the join is cheap on a library this size.
+        this.state.items_ = await window.PS_DB.all('items');
         this.state.storage = await window.PS_OPFS.usage();
         this.state.persisted = navigator.storage && navigator.storage.persisted
             ? await navigator.storage.persisted()
             : false;
     }
 
-    async guard(label, fn) {
-        // Refused rather than queued: two downloads at once would interleave their
-        // progress messages and compete for the same connection.
+    /**
+     * A download or a removal: one at a time.
+     *
+     * Separate from `task` below because they are different kinds of busy, and
+     * conflating them meant filtering the library during a download cleared the
+     * list and then refused to reload it, leaving the skeleton up for good.
+     */
+    async exclusive(label, fn) {
         if (this.state.busy) return;
         this.state.busy = true;
         this.state.error = '';
@@ -266,16 +311,35 @@ class OfflineSyncManager extends Component {
         try {
             await fn();
         } catch (err) {
-            console.error('[offline sync]', err);
-            this.state.error = String(err && err.message || err);
+            if (err && err.cancelled) {
+                this.state.status = '';
+            } else {
+                console.error('[offline sync]', err);
+                this.state.error = String(err && err.message || err);
+            }
         } finally {
             this.state.busy = false;
             this.state.status = '';
+            this.state.downloading = null;
+        }
+    }
+
+    /** Fetching a list. Runs whatever else is happening. */
+    async task(label, fn) {
+        const previous = this.state.status;
+        this.state.status = this.state.busy ? previous : label;
+        try {
+            await fn();
+        } catch (err) {
+            console.error('[offline sync]', err);
+            this.state.error = String(err && err.message || err);
+        } finally {
+            if (!this.state.busy) this.state.status = '';
         }
     }
 
     async loadViews() {
-        await this.guard('Loading libraries', async () => {
+        await this.task('Loading libraries', async () => {
             const res = await this.server().views();
             this.state.views = (res.Items || []).filter(
                 (v) => v.CollectionType === 'movies' || v.CollectionType === 'tvshows'
@@ -292,7 +356,7 @@ class OfflineSyncManager extends Component {
         if (append && this.state.itemsTotal && startIndex >= this.state.itemsTotal) return;
 
         this.state.loadingItems = true;
-        await this.guard(startIndex ? 'Loading more' : 'Loading items', async () => {
+        await this.task(startIndex ? 'Loading more' : 'Loading items', async () => {
             const res = await this.server().items({
                 ParentId: view.Id,
                 IncludeItemTypes: view.CollectionType === 'movies' ? 'Movie' : 'Series',
@@ -335,11 +399,124 @@ class OfflineSyncManager extends Component {
         this.state.heldFilter = ev.target.value;
     }
 
-    get filteredDownloads() {
-        const needle = this.state.heldFilter.trim().toLowerCase();
-        if (!needle) return this.state.downloads;
-        return this.state.downloads.filter((row) =>
-            String(row.name || row.itemId).toLowerCase().includes(needle));
+    /**
+     * The held library as a tree: films flat, episodes under their season under
+     * their series.
+     *
+     * A flat list of episodes is unusable once a series is downloaded — twenty
+     * rows called "Chapter Four" with nothing saying what they belong to — and
+     * removing a whole series should be one action rather than twenty.
+     */
+    downloadTree() {
+        const rows = this.matchingDownloads();
+        const byId = new Map((this.state.items_ || []).map((r) => [r.srv + '|' + r.id, r.dto]));
+        const dtoOf = (row) => byId.get(row.srv + '|' + row.itemId) || {};
+
+        const films = [];
+        const series = new Map();
+
+        for (const row of rows) {
+            const dto = dtoOf(row);
+            if (dto.Type !== 'Episode') {
+                films.push({ row, dto });
+                continue;
+            }
+            const seriesId = dto.SeriesId || 'unknown';
+            if (!series.has(seriesId)) {
+                const seriesDto = byId.get(row.srv + '|' + seriesId) || {};
+                series.set(seriesId, {
+                    id: seriesId,
+                    name: seriesDto.Name || dto.SeriesName || 'Unknown series',
+                    seasons: new Map()
+                });
+            }
+            const seasonId = dto.SeasonId || 'unknown';
+            const seasons = series.get(seriesId).seasons;
+            if (!seasons.has(seasonId)) {
+                const seasonDto = byId.get(row.srv + '|' + seasonId) || {};
+                seasons.set(seasonId, {
+                    id: seasonId,
+                    name: seasonDto.Name || (dto.ParentIndexNumber != null ? 'Season ' + dto.ParentIndexNumber : 'Episodes'),
+                    index: seasonDto.IndexNumber != null ? seasonDto.IndexNumber : (dto.ParentIndexNumber || 0),
+                    episodes: []
+                });
+            }
+            seasons.get(seasonId).episodes.push({ row, dto });
+        }
+
+        const nodes = [];
+        const size = (entries) => entries.reduce((n, e) => n + (e.row.bytesDone || 0), 0);
+        const isOpen = (id) => this.state.expanded.includes(id);
+
+        if (films.length) {
+            films.sort((a, b) => String(a.row.name).localeCompare(String(b.row.name)));
+            nodes.push({
+                kind: 'group', id: 'films', depth: 0, title: 'Movies and videos',
+                count: films.length, bytes: size(films), open: isOpen('films'),
+                rows: films.map((e) => e.row)
+            });
+            if (isOpen('films')) {
+                for (const entry of films) {
+                    nodes.push({ kind: 'item', id: 'f:' + entry.row.itemId, depth: 1, entry });
+                }
+            }
+        }
+
+        for (const show of [...series.values()].sort((a, b) => a.name.localeCompare(b.name))) {
+            const all = [...show.seasons.values()].flatMap((se) => se.episodes);
+            const showId = 's:' + show.id;
+            nodes.push({
+                kind: 'series', id: showId, depth: 0, title: show.name,
+                count: all.length, bytes: size(all), open: isOpen(showId),
+                rows: all.map((e) => e.row)
+            });
+            if (!isOpen(showId)) continue;
+
+            for (const season of [...show.seasons.values()].sort((a, b) => a.index - b.index)) {
+                const seasonId = 'se:' + season.id;
+                nodes.push({
+                    kind: 'season', id: seasonId, depth: 1, title: season.name,
+                    count: season.episodes.length, bytes: size(season.episodes),
+                    open: isOpen(seasonId), rows: season.episodes.map((e) => e.row)
+                });
+                if (!isOpen(seasonId)) continue;
+                season.episodes.sort((a, b) => (a.dto.IndexNumber || 0) - (b.dto.IndexNumber || 0));
+                for (const entry of season.episodes) {
+                    nodes.push({ kind: 'item', id: 'e:' + entry.row.itemId, depth: 2, entry });
+                }
+            }
+        }
+        return nodes;
+    }
+
+    toggleNode(id) {
+        const open = this.state.expanded;
+        const at = open.indexOf(id);
+        // Replaced rather than mutated: the template reads the array and a splice
+        // in place does not always announce itself.
+        this.state.expanded = at === -1 ? open.concat([id]) : open.filter((x) => x !== id);
+    }
+
+    removeMany(rows, label) {
+        this.exclusive(`Removing ${label}`, async () => {
+            for (const row of rows) await removeDownload(row);
+            await this.refreshDownloads();
+            await window.__phantom.libraryChanged();
+        });
+    }
+
+    cancelCurrent() {
+        cancelAll();
+        const current = this.state.downloading;
+        if (current) cancelDownload(current.srv, current.itemId, current.sourceId);
+        this.state.status = 'Cancelling…';
+    }
+
+    matchingDownloads() {
+        const rows = Array.from(this.state.downloads || []);
+        const needle = (this.state.heldFilter || '').trim().toLowerCase();
+        if (!needle) return rows;
+        return rows.filter((row) => String(row.name || row.itemId).toLowerCase().includes(needle));
     }
 
     /** Top up before the list runs out, so scrolling never stops at a boundary. */
@@ -389,7 +566,7 @@ class OfflineSyncManager extends Component {
      */
     start(item) {
         const server = this.server();
-        this.guard(`Checking ${item.Name}`, async () => {
+        this.exclusive(`Checking ${item.Name}`, async () => {
             const isSeries = item.Type === 'Series';
             let series = null;
             let sample = item;
@@ -400,14 +577,17 @@ class OfflineSyncManager extends Component {
                 if (!sample) throw new Error('series has no episodes');
             }
 
-            const { tracks, audio } = await inspectSubtitles(server, sample);
+            const inspected = await inspectSubtitles(server, sample);
+            const { tracks, audio } = inspected;
             const needsSubtitleChoice = tracks.some((t) => !t.canExtract);
             // More than one audio track is a question too: the browser plays
             // whichever the container defaults to and cannot switch, so picking
             // another one has to happen now or not at all.
             const needsAudioChoice = audio.length > 1;
 
-            if (!isSeries && !needsSubtitleChoice && !needsAudioChoice) {
+            // A transcode is work on somebody else's machine, and a series is that
+            // work once per episode, so it is worth saying before rather than after.
+            if (!isSeries && !needsSubtitleChoice && !needsAudioChoice && !inspected.willTranscode) {
                 await this.run(item, { mode: 'auto' }, null, {});
                 return;
             }
@@ -424,6 +604,11 @@ class OfflineSyncManager extends Component {
             this.state.askSummary = series
                 ? `${series.episodes} episodes, ${series.unwatched} unwatched`
                 : '';
+            this.state.askTranscode = !!inspected.willTranscode;
+            this.state.askQuality = window.PS_SCHEMA.DEFAULT_QUALITY;
+            this.state.askPicture = inspected.pictureTracks || [];
+            this.state.askServerWouldBurn = inspected.serverWouldBurn || null;
+            this.state.askContainer = inspected.container || '';
             this.state.asking = item;
         });
     }
@@ -432,12 +617,24 @@ class OfflineSyncManager extends Component {
         const item = this.state.asking;
         const choice = this.state.askChoice;
         const audioChoice = this.state.askAudioChoice;
-        const series = { seasonId: this.state.askSeasonId || null, unwatchedOnly: this.state.askUnwatchedOnly };
+        const series = {
+            seasonId: this.state.askSeasonId || null,
+            unwatchedOnly: this.state.askUnwatchedOnly,
+            quality: this.state.askQuality
+        };
         this.state.asking = null;
         const subtitle = choice === 'auto' || choice === 'none'
             ? { mode: choice }
             : { mode: 'burn', index: Number(choice) };
         this.run(item, subtitle, audioChoice === '' ? null : Number(audioChoice), series);
+    }
+
+    onAskQualityChange(ev) {
+        this.state.askQuality = ev.detail ? String(ev.detail.value) : ev.target.value;
+    }
+
+    get qualityOptions() {
+        return (window.PS_SCHEMA.QUALITIES || []).map((q) => ({ label: q.label, value: q.id }));
     }
 
     onAskSeasonChange(ev) {
@@ -484,10 +681,11 @@ class OfflineSyncManager extends Component {
         // Asked on the gesture, because Firefox only grants persistence while
         // handling one. Without it the browser may evict the whole library.
         const persisting = ensurePersistentStorage();
-        return this.guard(`Downloading ${item.Name}`, async () => {
+        return this.exclusive(`Downloading ${item.Name}`, async () => {
             const grant = await persisting;
             this.state.persisted = grant.persisted;
 
+            this.state.downloading = { srv: server.id, itemId: item.Id, sourceId: null };
             const onProgress = (done, total, unit, name) => {
                 this.state.status = unit === 'bytes'
                     ? `${item.Name}: ${fmtBytes(done)}${total ? ' of ' + fmtBytes(total) : ''}`
@@ -498,14 +696,17 @@ class OfflineSyncManager extends Component {
                 const result = await downloadSeries(server, item, {
                     subtitle, audioStreamIndex, onProgress,
                     seasonId: series.seasonId,
-                    unwatchedOnly: series.unwatchedOnly
+                    unwatchedOnly: series.unwatchedOnly,
+                    quality: series.quality
                 });
                 if (result.failures.length) {
                     this.state.error = `${result.failures.length} of ${result.episodes} episodes failed: `
                         + result.failures.map((f) => f.name).join(', ');
                 }
             } else {
-                await downloadItem(server, item, { subtitle, audioStreamIndex, onProgress });
+                await downloadItem(server, item, {
+                    subtitle, audioStreamIndex, onProgress, quality: series.quality
+                });
             }
             await this.refreshDownloads();
             await window.__phantom.libraryChanged();
@@ -513,7 +714,7 @@ class OfflineSyncManager extends Component {
     }
 
     removeHeld(row) {
-        this.guard(`Removing ${row.name || row.itemId}`, async () => {
+        this.exclusive(`Removing ${row.name || row.itemId}`, async () => {
             await removeDownload(row);
             await this.refreshDownloads();
             await window.__phantom.libraryChanged();
@@ -569,19 +770,41 @@ class OfflineSyncManager extends Component {
         `;
     }
 
-    renderDownload(row) {
+    /**
+     * One line of the tree.
+     *
+     * Reads only its node, like every other row in a virtual list: the node is
+     * rebuilt whenever expansion or the download set changes, so its `open` flag
+     * travels with it rather than being looked up at render time.
+     */
+    renderNode(node) {
+        if (node.kind === 'item') {
+            const { row, dto } = node.entry;
+            const number = dto.IndexNumber != null ? dto.IndexNumber + '. ' : '';
+            return html`
+                <div class="item" style="padding-left:${0.85 + node.depth * 1.4}em">
+                    <span class="caret leaf">▸</span>
+                    <span class="name">${number}${row.name || row.itemId}</span>
+                    <span class="tag">${row.mode} · ${fmtBytes(row.bytesDone)}</span>
+                    ${when(!!(row.subtitles && row.subtitles.length), () => html`
+                        <span class="tag">${row.subtitles.length} subs</span>
+                    `)}
+                    ${when(row.burnedSubtitleIndex != null, () => html`
+                        <span class="tag held">burned in</span>
+                    `)}
+                    <span class="tag keep">${row.state}</span>
+                    <button class="act" on-click="${() => this.removeHeld(row)}">Remove</button>
+                </div>
+            `;
+        }
+
+        const label = node.kind === 'season' ? 'season' : (node.kind === 'series' ? 'series' : 'group');
         return html`
-            <div class="item">
-                <span class="name">${row.name || row.itemId}</span>
-                <span class="tag">${row.mode} · ${fmtBytes(row.bytesDone)}</span>
-                ${when(!!(row.subtitles && row.subtitles.length), () => html`
-                    <span class="tag">${row.subtitles.length} subs</span>
-                `)}
-                ${when(row.burnedSubtitleIndex != null, () => html`
-                    <span class="tag held">burned in</span>
-                `)}
-                <span class="tag keep">${row.state}</span>
-                <button class="act" on-click="${() => this.removeHeld(row)}">Remove</button>
+            <div class="item node-group" style="padding-left:${0.85 + node.depth * 1.4}em">
+                <span class="caret ${node.open ? 'open' : ''}">▸</span>
+                <span class="name" on-click="${() => this.toggleNode(node.id)}">${node.title}</span>
+                <span class="tag">${node.count} items · ${fmtBytes(node.bytes)}</span>
+                <button class="act" on-click="${() => this.removeMany(node.rows, node.title)}">Remove ${label}</button>
             </div>
         `;
     }
@@ -673,15 +896,54 @@ class OfflineSyncManager extends Component {
                     </div>
                 `)}
 
-                <div class="statusline">
+                <div class="statusline row" style="align-items:center">
                     ${when(!!s.status, () => html`<span class="note">${s.status}</span>`)}
                     ${when(!!s.error, () => html`<span class="bad">${s.error}</span>`)}
+                    ${when(s.busy, () => html`
+                        <button class="act" on-click="${() => this.cancelCurrent()}">Cancel</button>
+                    `)}
                 </div>
 
                 ${when(!!s.asking, () => html`
                     <div class="ask">
                         <h3>Before downloading ${s.asking.Name}</h3>
                         ${when(!!s.askSummary, () => html`<p class="note">${s.askSummary}</p>`)}
+
+                        ${when(s.askTranscode, () => html`
+                            <div class="warn">
+                                <strong>This needs your server to transcode.</strong>
+                                The file is ${s.askContainer || 'in a container'} that this browser
+                                cannot play, so the server has to re-encode it — for every episode,
+                                one after another. That is real work on the machine hosting your
+                                library, and it may be slow or heavy for whoever else is using it.
+                            </div>
+                            <div class="field">
+                                <label for="osx-quality">Transcode quality</label>
+                                <cl-dropdown id="osx-quality"
+                                    options="${this.qualityOptions}"
+                                    value="${s.askQuality}"
+                                    on-change="${(ev) => this.onAskQualityChange(ev)}"></cl-dropdown>
+                            </div>
+                        `)}
+
+                        ${when(s.askPicture.length > 0 && s.askChoice === 'auto', () => html`
+                            <div class="warn">
+                                <strong>Picture-based subtitles will not be included.</strong>
+                                ${s.askPicture.length} track(s) here are images rather than text
+                                (${s.askPicture.map((t) => t.codec).join(', ')}), so they cannot be
+                                extracted and will be absent offline unless you burn one in above.
+                            </div>
+                        `)}
+
+                        ${when(!!s.askServerWouldBurn, () => html`
+                            <div class="warn">
+                                <strong>Your server would have burned one in.</strong>
+                                Left to itself it would encode
+                                "${s.askServerWouldBurn.title}" into the picture permanently,
+                                because it is the default track. This tool turns that off, so
+                                nothing is burned in unless you choose it here.
+                            </div>
+                        `)}
                         ${when(s.askTracks.length > 0, () => html`
                             <p class="note">
                                 This item has picture-based subtitles. They carry no text to
@@ -782,12 +1044,12 @@ class OfflineSyncManager extends Component {
                     ${when(s.downloads.length > 0, () => html`
                         <div class="panel scroller ${s.busy ? 'busy' : ''}">
                             <cl-virtual-list
-                                items="${this.filteredDownloads}"
+                                items="${this.downloadTree()}"
                                 itemHeight="${ROW_HEIGHT}"
                                 scrollContainer="parent"
                                 emptyMessage="Nothing matches that."
-                                renderItem="${(row) => this.renderDownload(row)}"
-                                keyFn="${(row) => row.srv + row.itemId + row.sourceId}"></cl-virtual-list>
+                                renderItem="${(node) => this.renderNode(node)}"
+                                keyFn="${(node) => node.id}"></cl-virtual-list>
                         </div>
                     `)}
                 </div>

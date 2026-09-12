@@ -123,7 +123,7 @@ if (IS_SERVICE_WORKER) {
             } catch {
                 // offline; fall through to whatever we hold
             }
-            const cached = await cache.match(key);
+            const cached = await cache.match(key) || await caches.match(key);
             if (cached) return cached;
             return new Response('offline and no cached app shell', { status: 503 });
         }
@@ -135,13 +135,17 @@ if (IS_SERVICE_WORKER) {
                 if (fresh.ok && fresh.type === 'basic') await cache.put(key, fresh.clone());
                 return fresh;
             } catch {
-                const cached = await cache.match(key);
+                const cached = await cache.match(key) || await caches.match(key);
                 if (cached) return cached;
                 return new Response('offline: ' + url.pathname, { status: 503 });
             }
         }
 
-        const cached = await cache.match(key);
+        // caches.match() searches every cache, not just the live one. A read that
+        // only looked at the active cache failed whenever the pointer had moved
+        // but some earlier cache still held the file — which is how an offline load
+        // got as far as the splash logo and no further.
+        const cached = await cache.match(key) || await caches.match(key);
         if (cached) return cached;
 
         try {
@@ -201,7 +205,11 @@ if (IS_SERVICE_WORKER) {
 
             let done = manifest.files.length - pending.length;
             const total = manifest.files.length;
-            const report = () => self.PS_NOTIFY.precacheProgress({ done, total, version: manifest.version });
+            const swapped = () => self.PS_DB.meta.get('precacheVersion', null)
+                .then((v) => v === manifest.version);
+            const report = async () => self.PS_NOTIFY.precacheProgress({
+                done, total, version: manifest.version, ready: (done >= total) && await swapped()
+            });
             report();
 
             // Small concurrency: enough to keep the connection busy, not so much
@@ -251,7 +259,16 @@ if (IS_SERVICE_WORKER) {
         }
         const building = await caches.open(CACHE_PREFIX + manifest.version);
         const keys = await building.keys();
-        return { done: keys.length, total: manifest.files.length, version: manifest.version };
+        // Ready means the live pointer names a cache that holds everything, not
+        // merely that a cache somewhere is full: until the swap the app is still
+        // being served from the previous one.
+        const live = await activeCacheName();
+        return {
+            done: keys.length,
+            total: manifest.files.length,
+            version: manifest.version,
+            ready: live === CACHE_PREFIX + manifest.version && keys.length >= manifest.files.length
+        };
     }
 
     // --- dispatch ------------------------------------------------------------

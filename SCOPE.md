@@ -26,6 +26,13 @@
   type-ahead hints the search screen draws first.
 - **Picking part of a series**: a single season, or only the episodes not yet
   watched, read from the source server's own watched state.
+- **Trickplay** scrubbing thumbnails, confirmed working against a server that has
+  them generated.
+- **Cancelling a download in flight**, which discards the partial file rather than
+  leaving something that looks held.
+- **Transcode quality**, chosen at sync time and defaulting to 720p, with a
+  warning before the fact: a download asks somebody else's server to re-encode,
+  once per episode.
 - **Dual audio.** A browser plays whichever track the container defaults to and
   cannot switch, so the settings page asks at sync time; choosing another track
   transcodes with it selected.
@@ -47,6 +54,9 @@
   rather than left truncated, so a retry starts clean.
 - Music, books, photos, live TV.
 - Filtering by genre, year or rating. Search matches names only.
+- Switching audio track or re-picking burned-in subtitles after download. Both are
+  fixed at sync time by what the browser can do, and changing either means
+  downloading the item again.
 - Chapter images.
 - Multiple versions of one item. The downloader picks the best single source.
 
@@ -69,12 +79,6 @@
 - **Persistent storage was never requested**, so the browser was free to evict
   the library. Asked for on the download gesture, which is the only time Firefox
   will grant it, and shown in the settings page.
-
-## Implemented but unverified
-
-**Trickplay** tiles are downloaded and served, and nothing exercises that path:
-the QA library has no trickplay generated, so there was nothing to download. It
-is written to fail quietly rather than to be trusted.
 
 ## Known non-issues
 

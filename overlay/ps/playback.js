@@ -65,6 +65,14 @@
             Bitrate: dl.bitrate || 0
         };
 
+        // Exactly one audio track is offered, because exactly one can be played.
+        // A transcode baked in whichever track was chosen and the others are not in
+        // the file; a downloaded original holds them all, but a browser plays the
+        // container's default and has no API to switch. Passing the source's full
+        // list through gave the player a track selector where every entry but one
+        // did nothing.
+        const playableAudio = base.DefaultAudioStreamIndex;
+
         // Only offer subtitle tracks we actually hold. A track the player can
         // select and then cannot fetch is worse than one that was never offered,
         // and a burned-in track is in the picture rather than in a list.
@@ -74,6 +82,11 @@
         // everything else to a native <track>. Reporting webvtt for an ASS file
         // would hand a styled script to the wrong renderer.
         base.MediaStreams = streams.map((st) => {
+            if (st.Type === 'Audio') {
+                if (playableAudio == null) return st;
+                if (st.Index !== playableAudio) return null;
+                return Object.assign({}, st, { IsDefault: true });
+            }
             if (st.Type !== 'Subtitle') return st;
             const held = (dl.subtitles || []).find((sub) => sub.index === st.Index);
             if (!held) return null;

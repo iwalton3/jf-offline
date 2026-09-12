@@ -739,6 +739,125 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         seriesSearch.skipped || seriesSearch.found === true,
         seriesSearch.skipped ? 'no series held' : `"${seriesSearch.word}" -> ${seriesSearch.types.join(',')}`);
 
+    // The reported symptom: a real server sections search results and the phantom
+    // server put everything under Videos. The section query asks for a dozen types
+    // at once and jellyfin-web splits the answer by Type.
+    const sections = await page.evaluate(async () => {
+        const uid = window.ApiClient.getCurrentUserId();
+        const typed = await (await fetch(`/Items?userId=${uid}&Recursive=true&searchTerm=a`
+            + '&includeItemTypes=Movie&includeItemTypes=Series&includeItemTypes=Episode'
+            + '&includeItemTypes=Playlist&includeItemTypes=BoxSet')).json();
+        const videos = await (await fetch(`/Items?userId=${uid}&Recursive=true&searchTerm=a`
+            + '&excludeItemTypes=Movie&excludeItemTypes=Episode&excludeItemTypes=TvChannel'
+            + '&mediaTypes=Video')).json();
+        const held = await (await fetch(`/Items?userId=${uid}&Recursive=true&searchTerm=a`)).json();
+        return {
+            typed: [...new Set(typed.Items.map((i) => i.Type))].sort(),
+            held: [...new Set(held.Items.map((i) => i.Type))].sort(),
+            videosSection: [...new Set(videos.Items.map((i) => i.Type))].sort()
+        };
+    });
+    // Only the types actually asked for: a Season is held but was not in the list,
+    // and jellyfin-web does not put one in a section either.
+    const asked = ['Movie', 'Series', 'Episode', 'Playlist', 'BoxSet'];
+    const expected = sections.held.filter((t) => asked.includes(t));
+    check('the typed search query returns every kind so sections can form',
+        expected.length > 1 && expected.every((t) => sections.typed.includes(t)),
+        `got ${sections.typed.join(',')}, expected ${expected.join(',')}`);
+    check('the Videos section does not swallow movies and episodes',
+        !sections.videosSection.includes('Movie') && !sections.videosSection.includes('Episode'),
+        sections.videosSection.join(',') || 'empty');
+
+    // Only one audio track may be offered, because only one can be played.
+    const audioExposure = await page.evaluate(async (id) => {
+        const info = await (await fetch(`/Items/${id}/PlaybackInfo`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+        })).json();
+        const ms = info.MediaSources[0];
+        const audio = (ms.MediaStreams || []).filter((st) => st.Type === 'Audio');
+        return { count: audio.length, index: audio[0] && audio[0].Index, def: ms.DefaultAudioStreamIndex };
+    }, MULTI_AUDIO_ITEM);
+    check('a six-track file offers exactly one audio track',
+        audioExposure.count === 1 && audioExposure.index === audioExposure.def,
+        `${audioExposure.count} offered, index ${audioExposure.index}`);
+
+    // Nothing is burned in unless somebody chose it.
+    const burnGuard = await page.evaluate(async (pid, id) => {
+        const { knownServers, SourceServer } = await import('/web/plugin/source.js');
+        const { inspectSubtitles } = await import('/web/plugin/downloader.js');
+        const server = new SourceServer(knownServers(pid)[0]);
+        const item = await server.item(id);
+        const info = await inspectSubtitles(server, item);
+        const row = await window.PS_DB.get('downloads', [server.id, id, id]);
+        return {
+            pictureTracks: (info.pictureTracks || []).length,
+            wouldBurn: !!info.serverWouldBurn,
+            burnedIndex: row ? row.burnedSubtitleIndex : 'no row'
+        };
+    }, phantomId, BURN_ITEM);
+    check('a picture-based track is reported so the UI can warn about it',
+        burnGuard.pictureTracks > 0, `${burnGuard.pictureTracks} picture track(s)`);
+
+    const unchosen = await page.evaluate(async (pid, id) => {
+        const { knownServers, SourceServer } = await import('/web/plugin/source.js');
+        const { downloadItem, removeDownload } = await import('/web/plugin/downloader.js');
+        const server = new SourceServer(knownServers(pid)[0]);
+        const item = await server.item(id);
+        const existing = await window.PS_DB.get('downloads', [server.id, id, id]);
+        if (existing) await removeDownload(existing);
+        // No subtitle choice at all: the server must not fall back to burning its
+        // own default track in.
+        const row = await downloadItem(server, item, { quality: '480p' });
+        return { mode: row.mode, burned: row.burnedSubtitleIndex, quality: row.quality };
+    }, phantomId, BURN_ITEM);
+    check('nothing is burned in when the user did not choose it',
+        unchosen.burned === null, String(unchosen.burned));
+    check('the chosen transcode quality is recorded', unchosen.quality === '480p', unchosen.quality);
+
+    // Cancelling has to stop the transfer, not just stop reporting it.
+    const cancelled = await page.evaluate(async (pid) => {
+        const { knownServers, SourceServer } = await import('/web/plugin/source.js');
+        const { downloadItem, cancelDownload, listDownloads } = await import('/web/plugin/downloader.js');
+        const server = new SourceServer(knownServers(pid)[0]);
+        // Something not already held, so the cancel can only affect its own row.
+        const held = new Set((await listDownloads()).map((r) => r.itemId));
+        const candidates = await server.items({ IncludeItemTypes: 'Movie', Limit: 60, SortBy: 'SortName' });
+        const big = (candidates.Items || []).find((i) => !held.has(i.Id));
+        if (!big) return { skipped: true };
+
+        const before = (await listDownloads()).length;
+        const promise = downloadItem(server, big, {});
+        let stopped = false;
+        for (let i = 0; i < 200 && !stopped; i++) {
+            stopped = await cancelDownload(server.id, big.Id, big.Id);
+            if (!stopped) await new Promise((r) => setTimeout(r, 10));
+        }
+        let outcome = 'completed';
+        try { await promise; } catch (err) { outcome = err.cancelled ? 'cancelled' : 'error:' + err.message; }
+        const after = (await listDownloads()).length;
+        return { stopped, outcome, before, after };
+    }, phantomId);
+    check('an in-flight download can be cancelled',
+        cancelled.skipped || (cancelled.stopped === true && cancelled.outcome === 'cancelled'),
+        cancelled.skipped ? 'no fixture' : `${cancelled.outcome}`);
+    check('a cancelled download leaves no half-written row',
+        cancelled.skipped || cancelled.after === cancelled.before,
+        `${cancelled.before} rows before, ${cancelled.after} after`);
+
+    const reDownload = await page.evaluate(async (pid, id) => {
+        const { knownServers, SourceServer } = await import('/web/plugin/source.js');
+        const { downloadItem } = await import('/web/plugin/downloader.js');
+        const server = new SourceServer(knownServers(pid)[0]);
+        const item = await server.item(id);
+        const before = await window.PS_DB.get('downloads', [server.id, id, id]);
+        const started = Date.now();
+        const row = await downloadItem(server, item, {});
+        return { wasHeld: !!before, sameRow: before && row.createdAt === before.createdAt, ms: Date.now() - started };
+    }, phantomId, DIRECT_ITEM);
+    check('an item already held is not downloaded again',
+        reDownload.wasHeld && reDownload.sameRow === true,
+        `held ${reDownload.wasHeld}, returned in ${reDownload.ms}ms`);
+
     // ---- 6c. the offline app shell ---------------------------------------
 
     const manifest = await page.evaluate(async () => {

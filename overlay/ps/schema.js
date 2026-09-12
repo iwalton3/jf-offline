@@ -61,8 +61,24 @@
         QUEUED: 'queued',
         RUNNING: 'running',
         COMPLETE: 'complete',
-        ERROR: 'error'
+        ERROR: 'error',
+        CANCELLED: 'cancelled'
     };
+
+    /**
+     * Transcode quality, chosen at sync time.
+     *
+     * Defaults to 720p rather than source: a download asks somebody else's server
+     * to transcode, often several episodes back to back, and the person pressing
+     * the button is not the person whose CPU pays for it.
+     */
+    const QUALITIES = [
+        { id: 'original', label: 'Source quality', maxHeight: null, bitrate: null },
+        { id: '1080p', label: '1080p', maxHeight: 1080, bitrate: 8000000 },
+        { id: '720p', label: '720p', maxHeight: 720, bitrate: 3000000 },
+        { id: '480p', label: '480p', maxHeight: 480, bitrate: 1500000 }
+    ];
+    const DEFAULT_QUALITY = '720p';
 
     // 'direct' stores the source file untouched; 'hls' stores a downloaded VOD
     // transcode as playlist plus segments.
@@ -115,5 +131,5 @@
         image: (srv, itemId, type) => ['images', srv, itemId, String(type).toLowerCase()]
     };
 
-    g.PS_SCHEMA = { ID, VIEWS, DB, DOWNLOAD_STATE, DOWNLOAD_MODE, SUBTITLE_MODE, SET_BY, TICKS_PER_MS, OPFS_ROOT, paths };
+    g.PS_SCHEMA = { ID, VIEWS, DB, DOWNLOAD_STATE, DOWNLOAD_MODE, SUBTITLE_MODE, QUALITIES, DEFAULT_QUALITY, SET_BY, TICKS_PER_MS, OPFS_ROOT, paths };
 })(self);

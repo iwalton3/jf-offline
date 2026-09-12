@@ -108,6 +108,11 @@ export class SourceServer {
         return res;
     }
 
+    /** An AbortSignal reaches the network through here; see the downloader. */
+    fetchSignal(path, signal) {
+        return this.fetch(path, signal ? { signal } : undefined);
+    }
+
     async json(path, query) {
         const u = new URL(this.url + (path.startsWith('/') ? path : '/' + path));
         for (const [k, v] of Object.entries(query || {})) {

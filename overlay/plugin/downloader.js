@@ -28,6 +28,43 @@ const OPFS = () => window.PS_OPFS;
 const plain = (value) => (value == null ? value : JSON.parse(JSON.stringify(value)));
 
 /**
+ * Downloads that can still be stopped, by the key their row is stored under.
+ *
+ * A cancel has to reach the fetch that is in flight — a several-gigabyte file or
+ * a long run of segments will not notice a flag between iterations — so each
+ * download carries an AbortController and the map is how the UI finds it.
+ */
+const inFlight = new Map();
+
+const downloadKey = (srv, itemId, sourceId) => [srv, itemId, sourceId].join('|');
+
+/** Stop a running download. Partial files are discarded, not left to look held. */
+export async function cancelDownload(srv, itemId, sourceId) {
+    const entry = inFlight.get(downloadKey(srv, itemId, sourceId));
+    if (!entry) return false;
+    entry.cancelled = true;
+    entry.controller.abort();
+    return true;
+}
+
+/** Stop everything, including the rest of a series that has not started yet. */
+export function cancelAll() {
+    for (const entry of inFlight.values()) {
+        entry.cancelled = true;
+        entry.controller.abort();
+    }
+    seriesCancelled = true;
+    return inFlight.size;
+}
+
+let seriesCancelled = false;
+
+export const isCancelled = (srv, itemId, sourceId) => {
+    const entry = inFlight.get(downloadKey(srv, itemId, sourceId));
+    return !!(entry && entry.cancelled);
+};
+
+/**
  * Ask the browser not to evict this origin's storage.
  *
  * Without it everything downloaded is "best effort" and the browser may clear it
@@ -277,11 +314,11 @@ async function setRow(row, changes) {
  * Streamed straight to disk rather than buffered: the whole reason media does not
  * live in IndexedDB is that it is too large to materialise.
  */
-async function downloadDirect(server, dto, mediaSource, row, onProgress) {
+async function downloadDirect(server, dto, mediaSource, row, onProgress, signal) {
     const container = (mediaSource.Container || 'mp4').toLowerCase();
     const url = `${server.url}/Videos/${dto.Id}/stream.${container}`
         + `?Static=true&mediaSourceId=${encodeURIComponent(mediaSource.Id)}`;
-    const res = await server.fetch(url);
+    const res = await server.fetchSignal(url, signal);
 
     const declared = parseInt(res.headers.get('Content-Length') || '', 10);
     const total = Number.isFinite(declared) ? declared : (mediaSource.Size || 0);
@@ -299,6 +336,13 @@ async function downloadDirect(server, dto, mediaSource, row, onProgress) {
  * TranscodingUrl rather than be requested separately; the server hands back a
  * playlist whose segments already have the subtitle in the picture.
  */
+/** The transcode parameters for a chosen quality, or none for source quality. */
+export function qualityParams(qualityId) {
+    const quality = (window.PS_SCHEMA.QUALITIES || []).find((q) => q.id === qualityId);
+    if (!quality || !quality.maxHeight) return null;
+    return { MaxHeight: quality.maxHeight, VideoBitrate: quality.bitrate };
+}
+
 function withParams(url, params) {
     if (!params) return url;
     const u = new URL(url);
@@ -323,9 +367,9 @@ function segmentUrls(playlist, playlistUrl) {
  * are fetched in order on purpose: asking for one out of order makes the server
  * restart ffmpeg at an offset, which is correct and slow.
  */
-async function downloadHls(server, dto, mediaSource, row, onProgress, extraParams) {
+async function downloadHls(server, dto, mediaSource, row, onProgress, extraParams, signal) {
     const masterUrl = withParams(server.url + mediaSource.TranscodingUrl, extraParams);
-    const master = await (await server.fetch(masterUrl)).text();
+    const master = await (await server.fetchSignal(masterUrl, signal)).text();
 
     // A master playlist points at one variant; a server that answered with the
     // variant directly needs no second hop.
@@ -335,7 +379,7 @@ async function downloadHls(server, dto, mediaSource, row, onProgress, extraParam
         const line = master.split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('#'));
         if (!line) throw new Error('master playlist named no variant');
         variantUrl = withParams(new URL(line, masterUrl).toString(), extraParams);
-        variant = await (await server.fetch(variantUrl)).text();
+        variant = await (await server.fetchSignal(variantUrl, signal)).text();
     }
 
     if (!variant.includes('#EXT-X-ENDLIST')) {
@@ -351,7 +395,8 @@ async function downloadHls(server, dto, mediaSource, row, onProgress, extraParam
 
     let bytes = 0;
     for (let i = 0; i < urls.length; i++) {
-        const res = await server.fetch(urls[i]);
+        if (signal && signal.aborted) throw new DOMException('cancelled', 'AbortError');
+        const res = await server.fetchSignal(urls[i], signal);
         const blob = await res.blob();
         await OPFS().writeBlob(S().paths.hlsSegment(server.id, dto.Id, mediaSource.Id, i), blob);
         bytes += blob.size;
@@ -403,6 +448,19 @@ export async function downloadItem(server, reactiveDto, options = {}) {
         throw new Error('server can neither stream nor transcode this item');
     }
 
+    // Already held: do nothing. Re-running a series download then costs only the
+    // episodes that are missing, which is what makes topping one up cheap — and it
+    // removes the case where cancelling a re-download destroyed the copy that was
+    // already on disk.
+    const existing = await DB().get('downloads', [server.id, dto.Id, mediaSource.Id]);
+    if (existing && existing.state === S().DOWNLOAD_STATE.COMPLETE && !options.replace) {
+        return existing;
+    }
+
+    const key = downloadKey(server.id, dto.Id, mediaSource.Id);
+    const controller = new AbortController();
+    inFlight.set(key, { controller, cancelled: false });
+
     let row = {
         srv: server.id,
         itemId: dto.Id,
@@ -421,6 +479,7 @@ export async function downloadItem(server, reactiveDto, options = {}) {
             : null,
         audioStreamIndex: chosenAudio,
         bitrate: mediaSource.Bitrate || 0,
+        quality: options.quality || S().DEFAULT_QUALITY,
         subtitleMode: subtitle.mode,
         burnedSubtitleIndex: burning ? subtitle.index : null,
         subtitles: [],
@@ -443,17 +502,25 @@ export async function downloadItem(server, reactiveDto, options = {}) {
         if (burning) {
             transcodeParams.SubtitleStreamIndex = subtitle.index;
             transcodeParams.SubtitleMethod = 'Encode';
+        } else {
+            // -1 is "no subtitles", and saying so is not optional. Leave the index
+            // out and the server falls back to the user's own default selection,
+            // which for a Japanese audio track is often a picture-based signs and
+            // songs track — burned into the video, permanently, without anybody
+            // asking. Every burn-in this tool does is one somebody chose.
+            transcodeParams.SubtitleStreamIndex = -1;
         }
         if (chosenAudio != null) transcodeParams.AudioStreamIndex = chosenAudio;
+        Object.assign(transcodeParams, qualityParams(row.quality) || {});
         const extraParams = Object.keys(transcodeParams).length ? transcodeParams : null;
 
         const result = mode === S().DOWNLOAD_MODE.DIRECT
             ? await downloadDirect(server, dto, mediaSource, row, (done, total) => {
                 onProgress(done, total, 'bytes');
-            })
+            }, controller.signal)
             : await downloadHls(server, dto, mediaSource, row, (done, total) => {
                 onProgress(done, total, 'segments');
-            }, extraParams);
+            }, extraParams, controller.signal);
 
         // Sidecars only make sense when nothing was burned in: a burned track is
         // in the picture, and offering it again as a switchable overlay would
@@ -482,8 +549,20 @@ export async function downloadItem(server, reactiveDto, options = {}) {
         });
         return row;
     } catch (err) {
+        const wasCancelled = (inFlight.get(key) || {}).cancelled || err.name === 'AbortError';
+        if (wasCancelled) {
+            // A half-written item must not look held: it would play as a truncated
+            // file and count against storage with no way to tell why.
+            await OPFS().removeDir(S().paths.mediaDir(server.id, dto.Id, mediaSource.Id));
+            await DB().del('downloads', [server.id, dto.Id, mediaSource.Id]);
+            const cancelError = new Error('cancelled');
+            cancelError.cancelled = true;
+            throw cancelError;
+        }
         await setRow(row, { state: S().DOWNLOAD_STATE.ERROR, error: String(err.message || err) });
         throw err;
+    } finally {
+        inFlight.delete(key);
     }
 }
 
@@ -498,10 +577,26 @@ export async function inspectSubtitles(server, reactiveDto) {
     const info = await server.playbackInfo(dto.Id);
     const mediaSource = pickMediaSource(info.MediaSources || []);
     if (!mediaSource) return { tracks: [], audio: [], container: null };
+    const canDirect = (mediaSource.SupportsDirectPlay || mediaSource.SupportsDirectStream)
+        && directPlayable(mediaSource.Container);
+    const tracks = subtitleOptions(mediaSource);
+    const picture = tracks.filter((t) => !t.canExtract);
+    const serverDefault = mediaSource.DefaultSubtitleStreamIndex;
     return {
-        tracks: subtitleOptions(mediaSource),
+        tracks,
         audio: audioOptions(mediaSource),
-        container: mediaSource.Container
+        container: mediaSource.Container,
+        pictureTracks: picture,
+        // What the source server would have done if we said nothing. Worth
+        // reporting, because "keep text tracks" reads as "change nothing" and the
+        // server's idea of nothing is to burn its own default in.
+        serverWouldBurn: !canDirect && picture.some((t) => t.index === serverDefault)
+            ? picture.find((t) => t.index === serverDefault)
+            : null,
+        // Worth saying out loud before the button is pressed: a transcode is work
+        // on somebody else's machine, and a series is that work N times over.
+        willTranscode: !canDirect,
+        reasons: mediaSource.TranscodeReasons || null
     };
 }
 
@@ -535,21 +630,29 @@ export async function downloadSeries(server, reactiveSeriesDto, options = {}) {
     if (options.seasonId) list = list.filter((ep) => ep.SeasonId === options.seasonId);
     if (options.unwatchedOnly) list = list.filter((ep) => !(ep.UserData && ep.UserData.Played));
 
+    seriesCancelled = false;
     const failures = [];
+    let taken = 0;
     for (let i = 0; i < list.length; i++) {
+        // Checked between episodes as well as inside each one: cancelling episode
+        // three should not start episode four.
+        if (seriesCancelled) break;
         onProgress(i, list.length, 'episodes', list[i].Name);
         try {
             await downloadItem(server, list[i], {
                 subtitle: options.subtitle,
-                audioStreamIndex: options.audioStreamIndex
+                audioStreamIndex: options.audioStreamIndex,
+                quality: options.quality
             });
+            taken++;
         } catch (err) {
+            if (err.cancelled) break;
             // One unplayable episode should not abandon the rest of the series.
             failures.push({ name: list[i].Name, error: String(err.message || err) });
         }
     }
-    onProgress(list.length, list.length, 'episodes');
-    return { episodes: list.length, failures };
+    onProgress(taken, list.length, 'episodes');
+    return { episodes: taken, planned: list.length, failures, cancelled: seriesCancelled };
 }
 
 /** Seasons and episode counts, for the question asked before a series download. */

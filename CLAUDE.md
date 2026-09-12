@@ -62,6 +62,18 @@ HEADFUL=1 ... node tools/smoke.js   # to watch it
   nothing cached, and writes issued in that window went into a deleted cache and
   vanished — an app that stopped working intermittently, always just after an
   update.
+- **Never let the source server choose what to burn in.** Ask for a transcode
+  without naming `SubtitleStreamIndex` and Jellyfin falls back to the user's own
+  default track, which for Japanese audio is often picture-based signs and songs —
+  encoded into the video permanently, with nobody asked. Pass `-1` unless a track
+  was deliberately chosen.
+- **Report only what can actually be played.** Passing the source's full stream
+  list through gave the app an audio track selector where every entry but one did
+  nothing: a transcode holds one track, and a browser cannot switch tracks in a
+  downloaded original either.
+- **A vdx getter is a computed cell, and chaining one into another breaks.** It
+  surfaced as `rows is not iterable` from inside a reactive effect. Use plain
+  methods for anything a template composes.
 - **A row inside `cl-virtual-list` may read nothing but its own item.** Rows are
   memoised by key, so a row drawn while the component was busy keeps that
   appearance for good. This is how every download button ended up greyed out
