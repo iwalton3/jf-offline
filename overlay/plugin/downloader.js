@@ -1147,6 +1147,37 @@ export async function removeDownload(reactiveRow) {
     if (dropped.has(row.itemId)) await DB().del('userdata', [row.srv, row.itemId]);
 }
 
+/**
+ * What is on disk, grouped the way the download list is drawn.
+ *
+ * Walked rather than summed from the rows. `bytesDone` records the media
+ * transfer and nothing else: subtitles, font attachments, trickplay tiles and
+ * artwork are all written without touching it, and a series' or a season's
+ * artwork belongs to no download row at all. A figure built from the rows
+ * therefore understates the disk by whatever the sidecars weigh however correct
+ * deletion is — measured at 24% of the store on the smoke fixture — and
+ * SCOPE.md says the figure accounts for every byte on disk.
+ *
+ * Keys are the path prefixes themselves, so a caller cannot group by a rule that
+ * disagrees with where the bytes were written.
+ */
+export async function storageUsed() {
+    const used = { total: 0, byDownload: {}, byItem: {} };
+    for (const entry of await OPFS().walk([])) {
+        const [root, srv, itemId, sourceId] = entry.path;
+        used.total += entry.size;
+        if (!srv || !itemId) continue;
+        if (root === 'media' && sourceId) {
+            const key = srv + '/' + itemId + '/' + sourceId;
+            used.byDownload[key] = (used.byDownload[key] || 0) + entry.size;
+        } else if (root === 'images') {
+            const key = srv + '/' + itemId;
+            used.byItem[key] = (used.byItem[key] || 0) + entry.size;
+        }
+    }
+    return used;
+}
+
 export async function listDownloads() {
     return DB().all('downloads');
 }

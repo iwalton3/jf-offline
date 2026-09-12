@@ -1553,6 +1553,39 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         };
     });
 
+    // "Downloads are using X" means every byte on disk (SCOPE.md, the owner's
+    // answer). Compared against a walk of the store rather than against the sum
+    // it is computed from, because a figure checked against its own inputs
+    // cannot see what those inputs never counted: bytesDone records the media
+    // transfer, and subtitles, font attachments, trickplay tiles and artwork are
+    // all written without touching it.
+    const figure = await page.evaluate(async () => {
+        const el = document.querySelector('offline-sync-manager');
+        if (!el) return { error: 'settings page did not mount' };
+        await el.refreshDownloads();
+        const files = await window.PS_OPFS.walk([]);
+        const onDisk = files.reduce((n, f) => n + f.size, 0);
+        const kinds = new Set(files.map((f) => (f.path[0] === 'images' ? 'images' : f.path[4] || 'media')));
+        const rows = el.state.downloads || [];
+        return {
+            reported: el.heldBytes(),
+            onDisk,
+            mediaOnly: rows.reduce((n, r) => n + (r.bytesDone || 0), 0),
+            kinds: [...kinds].sort(),
+            files: files.length
+        };
+    });
+
+    // Vacuous unless the store holds something the media transfer does not
+    // account for, which is the whole point of the figure being wrong.
+    check('the store holds sidecars and artwork, not only media',
+        !figure.error && figure.kinds.length > 1,
+        figure.error || `${figure.files} files across ${figure.kinds.join(', ')}`);
+    check('the storage figure equals the bytes actually on disk',
+        !figure.error && figure.onDisk > 0 && figure.reported === figure.onDisk,
+        figure.error || `reports ${figure.reported}, on disk ${figure.onDisk}`
+            + `, media transfers alone ${figure.mediaOnly}`);
+
     // cl-virtual-list memoises with trustKey, so a cached row for a key is reused
     // without calling the render function again. Anything a row draws from that
     // is not in its key is therefore frozen at whatever it was first drawn with.

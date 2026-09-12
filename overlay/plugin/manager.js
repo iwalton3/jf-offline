@@ -28,7 +28,7 @@ import './vdx/ui/selection/dropdown.js';
 import './vdx/ui/data/virtual-list.js';
 import { knownServers, SourceServer } from './source.js';
 import {
-    downloadItem, downloadSeries, removeDownload, listDownloads,
+    downloadItem, downloadSeries, removeDownload, listDownloads, storageUsed,
     ensurePersistentStorage, inspectSubtitles, inspectSeries, inspectSeriesTracks,
     inspectEpisodeTracks, bulkSelect, cancelDownload, cancelAll
 } from './downloader.js';
@@ -100,6 +100,8 @@ class OfflineSyncManager extends Component {
         downloads: [],
         held: [],
         storage: { usage: 0, quota: 0 },
+        // What the store actually holds, walked. See storageUsed().
+        used: { total: 0, byDownload: {}, byItem: {} },
         persisted: false,
         precache: { done: 0, total: 0, ready: false },
         status: '',
@@ -410,6 +412,9 @@ class OfflineSyncManager extends Component {
         // The rows say what is held; the item store says what it belongs to. The
         // tree needs both, and the join is cheap on a library this size.
         this.state.items_ = await window.PS_DB.all('items');
+        // The walk, not the rows. See storageUsed(); the page promises every byte
+        // on disk and the rows only ever knew about the media transfer.
+        this.state.used = await storageUsed();
         this.state.storage = await window.PS_OPFS.usage();
         this.state.persisted = navigator.storage && navigator.storage.persisted
             ? await navigator.storage.persisted()
@@ -587,7 +592,9 @@ class OfflineSyncManager extends Component {
         }
 
         const nodes = [];
-        const size = (entries) => entries.reduce((n, e) => n + (e.row.bytesDone || 0), 0);
+        // Includes the container's own artwork, so the groups add up to the
+        // figure at the bottom of the page instead of to a smaller number.
+        const size = (entries, own) => entries.reduce((n, e) => n + this.rowBytes(e.row), 0) + (own || 0);
         const isOpen = (id) => this.state.expanded.includes(id);
 
         // Movies are listed flat, with no group above them. A group carries a
@@ -605,7 +612,8 @@ class OfflineSyncManager extends Component {
             const showId = 's:' + show.id;
             nodes.push({
                 kind: 'series', id: showId, depth: 0, title: show.name,
-                count: all.length, bytes: size(all), open: isOpen(showId),
+                count: all.length, open: isOpen(showId),
+                bytes: size(all, this.ownBytes(all[0].row.srv, show.id)),
                 rows: all.map((e) => e.row)
             });
             if (!isOpen(showId)) continue;
@@ -614,7 +622,8 @@ class OfflineSyncManager extends Component {
                 const seasonId = 'se:' + season.id;
                 nodes.push({
                     kind: 'season', id: seasonId, depth: 1, title: season.name,
-                    count: season.episodes.length, bytes: size(season.episodes),
+                    count: season.episodes.length,
+                    bytes: size(season.episodes, this.ownBytes(season.episodes[0].row.srv, season.id)),
                     open: isOpen(seasonId), rows: season.episodes.map((e) => e.row)
                 });
                 if (!isOpen(seasonId)) continue;
@@ -1065,7 +1074,7 @@ class OfflineSyncManager extends Component {
     /** The key for a row in the held tree. Same rule as itemKey. */
     nodeKey(node) {
         return node.kind === 'item'
-            ? node.id + ':' + (node.entry.row.state || '') + ':' + (node.entry.row.bytesDone || 0)
+            ? node.id + ':' + (node.entry.row.state || '') + ':' + this.rowBytes(node.entry.row)
             : node.id + ':' + (node.open ? 'open' : 'shut') + ':' + node.count + ':' + node.bytes;
     }
 
@@ -1105,7 +1114,7 @@ class OfflineSyncManager extends Component {
                 <div class="item" style="padding-left:${0.85 + node.depth * 1.4}em">
                     <span class="caret leaf">▸</span>
                     <span class="name">${number}${row.name || row.itemId}</span>
-                    <span class="tag">${row.mode} · ${fmtBytes(row.bytesDone)}</span>
+                    <span class="tag">${row.mode} · ${fmtBytes(this.rowBytes(row))}</span>
                     ${when(!!(row.subtitles && row.subtitles.length), () => html`
                         <span class="tag">${row.subtitles.length} subs</span>
                     `)}
@@ -1198,9 +1207,21 @@ class OfflineSyncManager extends Component {
         `;
     }
 
-    /** What the rows say is held, which is the number the list adds up to. */
+    /** Every byte on disk, which is what the sentence beneath it promises. */
     heldBytes() {
-        return (this.state.downloads || []).reduce((n, row) => n + (row.bytesDone || 0), 0);
+        return (this.state.used || {}).total || 0;
+    }
+
+    /** What one download row occupies: its media, plus the artwork of its item. */
+    rowBytes(row) {
+        const used = this.state.used || {};
+        const media = (used.byDownload || {})[row.srv + '/' + row.itemId + '/' + row.sourceId] || 0;
+        return media + ((used.byItem || {})[row.srv + '/' + row.itemId] || 0);
+    }
+
+    /** A container's own artwork, which no row of the list owns. */
+    ownBytes(srv, id) {
+        return ((this.state.used || {}).byItem || {})[srv + '/' + id] || 0;
     }
 
     renderStorage() {
