@@ -28,7 +28,23 @@
                 }
             }
         };
-        req.onsuccess = () => resolve(req.result);
+        req.onsuccess = () => {
+            // Let go when someone else needs to upgrade. Without this a tab
+            // running the previous build holds the old version open and the new
+            // build's open() never completes — it does not fail, it waits, so
+            // the app simply never finishes starting and nothing says why.
+            //
+            // The memo is forgotten alongside the close, because `once` caches a
+            // SUCCESS: leaving it would hand the closed database to every later
+            // transaction in this context. Reopening after a real bump is a
+            // VersionError for a build pinned at the old version, which is that
+            // build being obsolete rather than this going wrong.
+            req.result.onversionchange = () => {
+                req.result.close();
+                open.forget();
+            };
+            resolve(req.result);
+        };
         req.onerror = () => reject(req.error);
         req.onblocked = () => reject(new Error('phantom db upgrade blocked by another tab'));
     }));

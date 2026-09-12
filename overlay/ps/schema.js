@@ -152,7 +152,7 @@
      */
     function once(fn) {
         let pending = null;
-        return function (...args) {
+        const memo = function (...args) {
             if (!pending) {
                 pending = Promise.resolve().then(() => fn.apply(this, args));
                 // Clears the memo without swallowing the rejection: callers still
@@ -161,6 +161,14 @@
             }
             return pending;
         };
+        // Forgetting a SUCCESS, which the rule above deliberately does not do.
+        // A memo that holds a resource has to be able to let go of one: the
+        // IndexedDB handle closes when another tab asks to upgrade, and a
+        // fulfilled memo would go on handing out the closed database to every
+        // later caller for the life of the page. Only a holder of the resource
+        // knows when that has happened, so it is a call rather than a rule.
+        memo.forget = () => { pending = null; };
+        return memo;
     }
 
     const paths = {

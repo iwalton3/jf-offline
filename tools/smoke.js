@@ -2287,6 +2287,57 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         !/favicon|manifest|Failed to load resource.*40[34]|ERR_INTERNET_DISCONNECTED|failed to fetch system info|internalException/i.test(e));
     check('no unexpected console errors', unexpected.length === 0, unexpected.slice(0, 3).join(' | '));
 
+    // ---- 11. letting go of the database -----------------------------------
+    //
+    // LAST on purpose. It really does upgrade the store, and a build pinned at
+    // the old version cannot open it again afterwards — which is the limitation
+    // this rule cannot fix and does not claim to. Puppeteer gives each run a
+    // fresh profile, so the upgraded database does not outlive the run.
+    //
+    // Two connections are open here, the page's and the worker's, and BOTH have
+    // to let go or the upgrade waits forever behind whichever did not.
+    const versionUpgrade = await page.evaluate(async () => {
+        await window.PS_DB.all('items');
+        await fetch('/Items?Recursive=true&Limit=1');
+
+        const name = window.PS_SCHEMA.DB.NAME;
+        const higher = window.PS_SCHEMA.DB.VERSION + 1;
+        const opened = await new Promise((res) => {
+            const req = indexedDB.open(name, higher);
+            let blocked = false;
+            req.onblocked = () => { blocked = true; };
+            req.onupgradeneeded = () => {};
+            req.onsuccess = () => res({ blocked, db: req.result });
+            req.onerror = () => res({ blocked, error: String(req.error && req.error.name) });
+            setTimeout(() => res({ blocked, error: 'never opened' }), 6000);
+        });
+        if (!opened.db) {
+            return { blocked: opened.blocked, opened: false, error: opened.error, after: null };
+        }
+        opened.db.close();
+
+        // Standing in for the build that asked for the bump: it reads at the
+        // version it asked for. Without this the next open is a VersionError,
+        // which is the old build being obsolete rather than the memo being stale,
+        // and the two must not be confused.
+        window.PS_SCHEMA.DB.VERSION = higher;
+        let after;
+        try {
+            after = Array.isArray(await window.PS_DB.all('items')) ? 'ok' : 'not an array';
+        } catch (err) {
+            after = err.name + ': ' + err.message;
+        }
+        return { blocked: opened.blocked, opened: true, after };
+    });
+
+    check('a higher-version open is not blocked by the connections already held',
+        versionUpgrade.opened === true && versionUpgrade.blocked === false,
+        versionUpgrade.opened
+            ? `opened, onblocked fired: ${versionUpgrade.blocked}`
+            : (versionUpgrade.error || 'did not open'));
+    check('and the memo does not go on handing out the closed connection',
+        versionUpgrade.after === 'ok', String(versionUpgrade.after));
+
     if (HEADFUL) await sleep(600000);
     await browser.close();
 
