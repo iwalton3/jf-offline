@@ -213,11 +213,17 @@ HEADFUL=1 ... node tools/smoke.js   # to watch it
   checkable; the older wording — "a row may read nothing but its own item" — was
   the same rule stated so that nothing could verify it, and the row broke it while
   the comment claimed otherwise.
-- **A cancelled download must never be recorded COMPLETE**, and the guard belongs
-  at the one place COMPLETE is written. Subtitles, font attachments, trickplay
-  tiles and images all run after the media transfer, none of them observed a
-  cancel, and each swallows its own errors — so an abort passed through them
-  unnoticed and the item appeared in the list as if nothing had happened.
+- **A cancelled download leaves nothing a later read can see**, wherever in the
+  download the cancel landed. Subtitles, font attachments, trickplay tiles and
+  images all run after the media transfer, none of them observed a cancel, and
+  each swallows its own errors — so an abort passed through them unnoticed and the
+  item appeared in the list as if nothing had happened. The narrower rule this
+  replaces — "never recorded COMPLETE, and the guard belongs at the one place
+  COMPLETE is written" — put the guard behind `putItem`, which is worse than no
+  guard: the library is derived from item rows, so a cancel landing there listed a
+  cancelled item as playable and nothing would ever remove it. What the code
+  guarantees and what this file claimed were not the same promise, and this line
+  is the promise.
 - **A stored DTO describes what is held, not what the source has.** Counts,
   and `Trickplay` — which arrives listing every width the server generated while
   the downloader keeps one. Advertising the rest lets jellyfin-web ask for tiles
