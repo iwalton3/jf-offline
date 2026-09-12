@@ -1,6 +1,7 @@
 # Experimental Offline Sync for Jellyfin Web
 
-This is an experimental Jellyfin-Web build with Offline Sync added.
+This is an experimental Jellyfin-Web build with Offline Sync added.  
+Note: If you want a fully-featured desktop client with offline sync, use [MPV Shim v3](https://github.com/jellyfin/jellyfin-mpv-shim), not this experiment.
 
 ![Screenshot](https://raw.githubusercontent.com/iwalton3/mpv-shim-misc-docs/bd8dff4530edf41881136a6ac482e19e0ee26f02/images/jf-offline.png)
 
@@ -16,7 +17,7 @@ Features:
 - Full "Airplane Mode" offline support.
 - Simulates a Jellyfin server locally using an offline service worker
 - Actual working subtitle/audio track support
-  - Can transcode media when syncing if needed
+  - Can transcode media when needed
   - Allows selecting the desired audio track at download time
   - Burns in subtitles not supported at download time
   - Downloads metadata, trickplay, and subtitle tracks
