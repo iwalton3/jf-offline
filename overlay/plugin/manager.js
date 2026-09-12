@@ -76,7 +76,6 @@ const askDefaults = () => ({
     // showing the wrong show's episodes.
     gridRows: [],
     gridChoices: {},
-    gridLoading: false,
     gridProgress: '',
     gridUnresolved: 0
 });
@@ -114,6 +113,12 @@ class OfflineSyncManager extends Component {
         expanded: [],
         items_: null,
         downloading: null,
+        // In flight rather than part of the question, which is why neither is in
+        // askDefaults(): that is the definition of the question and is used to
+        // CLEAR it, so a guard kept there is switched off by the very press it
+        // exists to refuse. `notes` lives outside it for the mirror-image reason.
+        inspecting: false,
+        gridLoading: false,
         // Type-to-filter for each list.
         itemFilter: '',
         heldFilter: '',
@@ -726,14 +731,14 @@ class OfflineSyncManager extends Component {
      */
     start(item) {
         if (!this.canDownload()) return;
-        // Refused here rather than by the lock below: a download already running
-        // is the thing to decline, and `checking` is not a download.
-        if (this.state.busy) return;
+        if (!this.canAsk()) return;
         const server = this.server();
         // Cleared before anything is read, so a question that fails part way
         // through cannot leave the previous one's answers on screen either.
         this.resetAsk();
         this.state.notes = [];
+        this.state.inspecting = true;
+        const generation = this.askGeneration;
         // NOT exclusive. Checking an item can end by calling run(), which takes
         // the exclusive lock — and holding it here meant run() was refused and the
         // download silently never started, for every item with nothing to ask
@@ -792,8 +797,26 @@ class OfflineSyncManager extends Component {
             this.state.askPicture = inspected.pictureTracks || [];
             this.state.askServerWouldBurn = inspected.serverWouldBurn || null;
             this.state.askContainer = inspected.container || '';
+            if (generation !== this.askGeneration) return;
             this.state.asking = item;
-        });
+        }).then(() => { this.state.inspecting = false; });
+    }
+
+    /**
+     * Whether a download question may be started.
+     *
+     * One definition, read by start() AND by the control that calls it, because
+     * SCOPE.md records the owner's answer: a second question is refused
+     * structurally. A button that stays pressable and quietly does nothing is
+     * the shape this replaces.
+     *
+     * `busy` alone did not answer it. That is the DOWNLOAD lock, taken by
+     * exclusive(); an inspection runs under task(), which never sets it, so two
+     * inspections could overlap and the later one's answers arrived on top of
+     * the earlier one's question.
+     */
+    canAsk() {
+        return !this.state.busy && !this.state.inspecting && !this.state.asking;
     }
 
     confirmAsk() {
@@ -848,6 +871,7 @@ class OfflineSyncManager extends Component {
     async openGrid() {
         const server = this.server();
         if (this.state.gridLoading) return;
+        const generation = this.askGeneration;
         this.state.gridLoading = true;
         // Awaited. Without this the flag was cleared before the first request had
         // even been issued, so a sweep of sixty episodes ran with gridLoading
@@ -858,6 +882,9 @@ class OfflineSyncManager extends Component {
             const rows = await inspectEpisodeTracks(server, list, (done, total) => {
                 this.state.gridProgress = `${done} of ${total}`;
             });
+            // A sixty-episode sweep outlives a press of Cancel, and its rows
+            // belong to the question that asked for them.
+            if (generation !== this.askGeneration) return;
             this.state.gridRows = rows;
             this.state.gridChoices = {};
             this.state.gridUnresolved = 0;
@@ -872,6 +899,11 @@ class OfflineSyncManager extends Component {
 
     /** Put the question back to nothing. Every entry and exit goes through here. */
     resetAsk() {
+        // Bumped so work already issued for the question being discarded can tell
+        // that its answers are no longer wanted. Two things write into this state
+        // after an await — the inspection in start() and the track sweep in
+        // openGrid() — and neither can be called back once it has gone.
+        this.askGeneration = (this.askGeneration || 0) + 1;
         Object.assign(this.state, askDefaults());
     }
 
@@ -1068,7 +1100,9 @@ class OfflineSyncManager extends Component {
      * fine; leaving what you read out of the key is not.
      */
     itemKey(item) {
-        return item.Id + (this.state.held.includes(item.Id) ? ':held' : '');
+        return item.Id
+            + (this.state.held.includes(item.Id) ? ':held' : '')
+            + (this.canAsk() ? '' : ':asking');
     }
 
     /** The key for a row in the held tree. Same rule as itemKey. */
@@ -1081,20 +1115,26 @@ class OfflineSyncManager extends Component {
     /**
      * A row.
      *
-     * Whatever this reads has to appear in itemKey(). Busy is deliberately not
-     * read here and not in the key either: a row drawn while something else was
-     * busy would keep that appearance for good, which is what left every button
-     * greyed out after a filter. Re-entry is refused in `guard` instead, where it
-     * is one check rather than one per row.
+     * Whatever this reads has to appear in itemKey(), and canAsk() does: the
+     * list memoises with trustKey, so a row drawn while a question was open
+     * would keep its disabled button for good — which is the shape of the bug
+     * that left every button greyed out after a filter. In the key it is the
+     * opposite: the row is redrawn when the answer flips, in both directions.
+     *
+     * `busy` on its own is still NOT read here. A download running is not a
+     * reason to refuse a question; canAsk() folds it in with the two flags that
+     * are, in one place rather than one per row.
      */
     renderItem(item) {
         const held = this.state.held.includes(item.Id);
+        const canAsk = this.canAsk();
         return html`
             <div class="item">
                 <span class="name">${item.Name}</span>
                 <span class="tag">${item.Type}${item.ProductionYear ? ' · ' + item.ProductionYear : ''}</span>
                 ${when(held, () => html`<span class="tag held">held</span>`)}
-                <button class="act" on-click="${() => this.start(item)}">Download</button>
+                <button class="act" disabled="${!canAsk}"
+                    on-click="${() => this.start(item)}">Download</button>
             </div>
         `;
     }

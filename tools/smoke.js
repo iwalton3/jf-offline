@@ -1876,6 +1876,95 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
             && leak.second.seasons < leak.bigSeasons,
         leak.error || `${leak.second.seasons} seasons vs the previous ${leak.bigSeasons}, grid ${leak.second.gridRows}`);
 
+    // One question at a time, and refused structurally: SCOPE.md records the
+    // owner's answer — while one is being inspected or waiting to be confirmed,
+    // the control that starts another is DISABLED, not merely ignored.
+    //
+    // Both races, separately. `busy` is the download lock and task() never sets
+    // it, so the second one was admitted by the rule the earlier fix wrote.
+    const oneQuestion = await page.evaluate(async (bigId, smallId) => {
+        const el = document.querySelector('offline-sync-manager');
+        if (!el) return { error: 'settings page did not mount' };
+        const wait = async (fn, ms = 30000) => {
+            const end = Date.now() + ms;
+            while (Date.now() < end) {
+                if (fn()) return true;
+                await new Promise((r) => setTimeout(r, 150));
+            }
+            return false;
+        };
+        const { knownServers, SourceServer } = await import('/web/plugin/source.js');
+        const server = new SourceServer(knownServers(window.PS_SCHEMA.ID.SERVER)[0]);
+        el.state.serverId = el.state.servers[0].id;
+        const big = await server.item(bigId);
+        const small = await server.item(smallId);
+
+        // Race 1: two inspections. The second press lands while the first is
+        // still reading the server, which is before anything opens.
+        el.cancelAsk();
+        el.start(big);
+        // A missing method counts as NOT refused, or the assertion passes on
+        // the absence of the thing it is checking for.
+        const refusedDuringInspection = typeof el.canAsk === 'function' && !el.canAsk();
+        el.start(small);
+        if (!await wait(() => el.state.asking)) return { error: 'no question ever opened' };
+        const afterTwoStarts = el.state.asking.Id;
+
+        // Race 2: a grid sweep, interrupted. The sweep is sixty PlaybackInfos and
+        // resetAsk() used to clear the very flag that was guarding it, because
+        // gridLoading lived in askDefaults().
+        el.cancelAsk();
+        el.start(big);
+        if (!await wait(() => el.state.asking && el.state.asking.Id === bigId)) {
+            return { error: 'the series question never opened' };
+        }
+        el.openGrid();
+        const loadingDuringSweep = el.state.gridLoading;
+        el.start(small);
+        const askingDuringSweep = el.state.asking && el.state.asking.Id;
+        const loadingAfterSecondPress = el.state.gridLoading;
+        if (!await wait(() => !el.state.gridLoading, 60000)) return { error: 'sweep never finished' };
+        const rowsAfterSweep = el.state.gridRows.length;
+        const askingAfterSweep = el.state.asking && el.state.asking.Id;
+
+        // And the structural half: the control, not just the handler. A row that
+        // draws a disabled button has to name that in its key, or cl-virtual-list
+        // hands back the cached row and the button never changes either way.
+        const keyWhileAsking = el.itemKey(small);
+        el.cancelAsk();
+        const keyWhenFree = el.itemKey(small);
+        const freeAfterCancel = typeof el.canAsk === 'function' && el.canAsk();
+        return {
+            refusedDuringInspection, afterTwoStarts, bigId, smallId,
+            loadingDuringSweep, askingDuringSweep, loadingAfterSecondPress,
+            rowsAfterSweep, askingAfterSweep,
+            keyMoves: keyWhileAsking !== keyWhenFree, freeAfterCancel
+        };
+    }, MULTI_SEASON_SERIES, SMALL_SERIES);
+
+    check('a second press during an inspection is refused',
+        !oneQuestion.error && oneQuestion.refusedDuringInspection === true
+            && oneQuestion.afterTwoStarts === oneQuestion.bigId,
+        oneQuestion.error || `refused ${oneQuestion.refusedDuringInspection}, `
+            + `opened ${oneQuestion.afterTwoStarts === oneQuestion.bigId ? 'the first' : 'the second'}`);
+
+    check('a second press during a track sweep neither replaces the question nor clears its guard',
+        !oneQuestion.error && oneQuestion.loadingDuringSweep === true
+            && oneQuestion.loadingAfterSecondPress === true
+            && oneQuestion.askingDuringSweep === oneQuestion.bigId,
+        oneQuestion.error || `guard ${oneQuestion.loadingDuringSweep} then `
+            + `${oneQuestion.loadingAfterSecondPress}, asking `
+            + `${oneQuestion.askingDuringSweep === oneQuestion.bigId ? 'unchanged' : 'replaced'}`);
+
+    check('the sweep\'s rows land in the question that asked for them',
+        !oneQuestion.error && oneQuestion.rowsAfterSweep > 0
+            && oneQuestion.askingAfterSweep === oneQuestion.bigId,
+        oneQuestion.error || `${oneQuestion.rowsAfterSweep} rows, asking ${oneQuestion.askingAfterSweep}`);
+
+    check('the picker is refused by the control and the row key says so',
+        !oneQuestion.error && oneQuestion.keyMoves === true && oneQuestion.freeAfterCancel === true,
+        oneQuestion.error || `key moves ${oneQuestion.keyMoves}, free after cancel ${oneQuestion.freeAfterCancel}`);
+
     // A copy becomes an encode the moment a subtitle is chosen to burn in, and the
     // dialog has to follow that. Otherwise the remux note keeps saying nothing is
     // lost while the hidden default quality cap is applied to a rebuilt picture.
