@@ -2439,6 +2439,197 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
                 + ` serves ${afterRemoval.firstStillServed}`);
     }
 
+    // ---- 9c. a library change reaches the home page -----------------------
+    //
+    // The worker answered a download or a removal at once, and the home page went
+    // on drawing the old library for a minute: every section loads through
+    // jellyfin-web's query cache, and a LibraryChanged push, in-app navigation and
+    // a reload all sit inside its 60s staleTime. Unfixed, the page stays frozen at
+    // its first load for that minute, so a remove-then-download sequence passes its
+    // second half against the frozen page. Both changes therefore land between ONE
+    // pair of home loads, on two different items: one that was shown goes, one that
+    // was not arrives, and a frozen page is wrong about both.
+    const manager = (serverId) => page.evaluate(async (srv) => {
+        location.hash = '#/configurationpage?name=offlinesync';
+        const deadline = Date.now() + 20000;
+        while (Date.now() < deadline) {
+            const el = [...document.querySelectorAll('offline-sync-manager')].find((e) => e.isConnected
+                && !e.closest('.page.hide') && e.state && e.state.servers.length);
+            if (el) {
+                el.state.serverId = srv;
+                return true;
+            }
+            await new Promise((r) => setTimeout(r, 200));
+        }
+        return false;
+    }, serverId);
+
+    // Resolves once the worker's LibraryChanged has been delivered, which is after
+    // the page has acted on it, so going home next cannot race the push.
+    const throughManager = (action, itemId) => page.evaluate(async (what, id) => {
+        const el = [...document.querySelectorAll('offline-sync-manager')]
+            .find((e) => e.isConnected && !e.closest('.page.hide'));
+        if (!el) return { error: 'manager not mounted' };
+        const wait = async (fn, ms) => {
+            const end = Date.now() + ms;
+            while (Date.now() < end) {
+                if (fn()) return true;
+                await new Promise((r) => setTimeout(r, 150));
+            }
+            return false;
+        };
+        const ws = new WebSocket(location.origin.replace('http', 'ws') + '/socket?ApiKey=x');
+        await new Promise((res) => { ws.onopen = res; setTimeout(res, 2000); });
+        const frame = new Promise((res) => {
+            ws.onmessage = (e) => {
+                const msg = JSON.parse(e.data);
+                if (msg.MessageType === 'LibraryChanged') res(msg.Data);
+            };
+            setTimeout(() => res(null), 60000);
+        });
+
+        // An error left by an earlier check would read as this action failing.
+        el.state.error = null;
+        await el.refreshDownloads();
+        if (what === 'remove') {
+            const row = el.state.downloads.find((r) => r.itemId === id);
+            if (!row) return { error: 'not held before removal' };
+            el.removeHeld(row);
+        } else {
+            const { SourceServer } = await import('/web/plugin/source.js');
+            const server = new SourceServer(el.state.servers.find((s) => s.id === el.state.serverId));
+            el.start(await server.item(id));
+            await wait(() => el.state.busy || el.state.asking || el.state.error, 30000);
+            if (el.state.asking) {
+                el.resetAsk();
+                el.state.asking = null;
+                return { error: 'the manager asked a question about a plain mp4' };
+            }
+        }
+        const settled = await wait(() => !el.state.busy && !el.state.inspecting, 60000);
+        const data = await frame;
+        ws.close();
+        const held = el.state.downloads.some((r) => r.itemId === id && r.state === 'complete');
+        return { settled, held, data, error: el.state.error || null };
+    }, action, itemId);
+
+    // Polled for the expected page, and settled only on a drawn one: sections are
+    // replaced while they load, and "absent" from an empty page is not a result.
+    // A frozen page stays wrong for the whole wait, so polling cannot pass it.
+    const homeShows = (expect) => page.evaluate(async (want) => {
+        location.hash = '#/home';
+        const end = Date.now() + 10000;
+        let last = { ok: false, cards: 0, shows: {} };
+        while (Date.now() < end) {
+            await new Promise((r) => setTimeout(r, 250));
+            const home = [...document.querySelectorAll('.page')]
+                .find((p) => !p.classList.contains('hide') && p.querySelector('.sections'));
+            if (!home) continue;
+            const shows = {};
+            for (const id of Object.keys(want)) shows[id] = !!home.querySelector(`.sections .card[data-id="${id}"]`);
+            const cards = home.querySelectorAll('.sections .card').length;
+            last = { ok: cards > 0 && Object.keys(want).every((id) => shows[id] === want[id]), cards, shows };
+            if (last.ok) return last;
+        }
+        return last;
+    }, expect);
+
+    // The arriving item: a small movie the manager downloads without asking, by
+    // the same test start() applies, so it goes through run() and not a dialog.
+    const quiet = await page.evaluate(async (phantom, srv, avoid) => {
+        const { knownServers, SourceServer } = await import('/web/plugin/source.js');
+        const { inspectSubtitles, listDownloads } = await import('/web/plugin/downloader.js');
+        const info = knownServers(phantom).find((s) => s.id === srv);
+        if (!info) return { error: 'source server not known' };
+        const server = new SourceServer(info);
+        const held = new Set((await listDownloads()).map((r) => r.itemId));
+        const candidates = (await server.items({ IncludeItemTypes: 'Movie', Limit: 300 })).Items
+            .filter((i) => i.Id !== avoid && !held.has(i.Id) && (i.MediaSources || []).length === 1)
+            .sort((a, b) => (a.MediaSources[0].Size || Infinity) - (b.MediaSources[0].Size || Infinity));
+        for (const item of candidates.slice(0, 15)) {
+            const t = await inspectSubtitles(server, item);
+            if (!t.tracks.some((x) => !x.canExtract) && t.audio.length <= 1 && !t.willTranscode) {
+                return { id: item.Id, name: item.Name };
+            }
+        }
+        return { error: 'no small movie the manager would download without asking' };
+    }, phantomId, added.serverId, direct.id);
+
+    const movies = await page.evaluate(() => window.PS_SCHEMA.ID.VIEW_MOVIES);
+    const mounted9c = await manager(added.serverId);
+    // DIRECT_ITEM out and back first, so it is the newest held item and on the
+    // home page however many films earlier checks left behind.
+    const reset = quiet.error ? quiet
+        : !mounted9c ? { error: 'manager never mounted' }
+            : await throughManager('remove', direct.id);
+    const fresh = reset.error ? reset : await throughManager('download', direct.id);
+    const homeFetchedAt = Date.now();
+    const before = fresh.error ? null : await homeShows({ [direct.id]: true, [quiet.id]: false });
+    check('the home page shows the newest download, and not the one about to arrive',
+        !fresh.error && fresh.held && before && before.ok,
+        fresh.error || JSON.stringify(before));
+
+    await manager(added.serverId);
+    const gone = before && before.ok ? await throughManager('remove', direct.id) : { error: 'no baseline' };
+    const arrived = gone.error ? gone : await throughManager('download', quiet.id);
+    const afterChange = arrived.error ? null : await homeShows({ [direct.id]: false, [quiet.id]: true });
+    // Taken after the last read, and the data is no older than homeFetchedAt, so
+    // this bounds the age of everything the page could have drawn from.
+    const elapsed = Date.now() - homeFetchedAt;
+
+    // Past the staleTime the app refetches by itself, and both checks would pass
+    // whatever the overlay did.
+    check('the home-page checks ran inside the query cache\'s 60s staleTime',
+        !!afterChange && elapsed < 55000, `${(elapsed / 1000).toFixed(1)}s`);
+    check('a removal through the manager is gone from the home page within the minute',
+        !!afterChange && afterChange.shows[direct.id] === false,
+        gone.error || JSON.stringify(afterChange));
+    check('a download through the manager is on the home page within the minute',
+        !!afterChange && arrived.held && afterChange.shows[quiet.id] === true,
+        arrived.error || JSON.stringify(afterChange));
+
+    check('LibraryChanged names what was removed, and the library it left',
+        !!gone.data && (gone.data.ItemsRemoved || []).includes(direct.id)
+        && (gone.data.FoldersRemovedFrom || []).includes(movies)
+        && (gone.data.CollectionFolders || []).includes(movies),
+        JSON.stringify(gone.data));
+    check('LibraryChanged names what was added, and the library it joined',
+        !!arrived.data && (arrived.data.ItemsAdded || []).includes(quiet.id)
+        && (arrived.data.FoldersAddedTo || []).includes(movies)
+        && (arrived.data.CollectionFolders || []).includes(movies),
+        JSON.stringify(arrived.data));
+
+    // Back as section 10 expects: DIRECT_ITEM held, the borrowed movie not.
+    const directHeld = await page.evaluate(async (xId, dId) => {
+        const { listDownloads, removeDownload } = await import('/web/plugin/downloader.js');
+        for (const row of (await listDownloads()).filter((r) => r.itemId === xId)) await removeDownload(row);
+        return (await listDownloads()).some((r) => r.itemId === dId && r.state === 'complete');
+    }, quiet.id || null, direct.id);
+    const restored = directHeld ? { state: 'complete' } : await download(DIRECT_ITEM);
+    check('DIRECT_ITEM is held again for the offline checks', restored.state === 'complete',
+        restored.error || restored.state);
+
+    // The request jellyfin-web's new-item notification makes for every entry in
+    // ItemsAdded (notifications.js). Answered without `ids`, it announced whichever
+    // held films sorted first.
+    const announced = await page.evaluate(async (id) => {
+        const q = `/Items?Ids=${id}&Recursive=true&Limit=3&Filters=IsNotFolder`
+            + '&SortBy=DateCreated&SortOrder=Descending&MediaTypes=Audio,Video&EnableTotalRecordCount=false';
+        const body = await (await fetch(q)).json();
+        const series = (await window.PS_DB.all('items')).find((r) => r.dto.Type === 'Series');
+        const folder = series
+            ? (await (await fetch(`/Items?Ids=${series.id}&Recursive=true&Filters=IsNotFolder`)).json()).Items.length
+            : null;
+        return { ids: body.Items.map((i) => i.Id), folder };
+    }, direct.id);
+    check('/Items answers ids with exactly the items named',
+        announced.ids.length === 1 && announced.ids[0] === direct.id, JSON.stringify(announced.ids));
+    if (announced.folder === null) {
+        skip('IsNotFolder drops a series named by id', 'no series held at this point');
+    } else {
+        check('IsNotFolder drops a series named by id', announced.folder === 0, `${announced.folder} returned`);
+    }
+
     // ---- 10. offline ------------------------------------------------------
 
     // Errors raised from here on are about a network that is deliberately gone.
