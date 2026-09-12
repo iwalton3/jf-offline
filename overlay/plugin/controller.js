@@ -101,7 +101,9 @@ class OfflineSyncManager extends Component {
         downloading: null,
         // Type-to-filter for each list.
         itemFilter: '',
-        heldFilter: ''
+        heldFilter: '',
+        // What the selected server's account is permitted to do.
+        policy: null
     }, askDefaults());
 
     static styles = /*css*/`
@@ -339,6 +341,18 @@ class OfflineSyncManager extends Component {
         return info ? new SourceServer(info) : null;
     }
 
+    canDownload() {
+        const policy = this.state.policy;
+        return !policy || policy.EnableContentDownloading !== false;
+    }
+
+    canTranscode() {
+        const policy = this.state.policy;
+        if (!policy) return true;
+        return policy.EnableVideoPlaybackTranscoding !== false
+            || policy.EnablePlaybackRemuxing !== false;
+    }
+
     async refreshDownloads() {
         const rows = await listDownloads();
         this.state.downloads = rows.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
@@ -396,7 +410,11 @@ class OfflineSyncManager extends Component {
 
     async loadViews() {
         await this.task('Loading libraries', async () => {
-            const res = await this.server().views();
+            const server = this.server();
+            // Read before anything is offered, so the reason a server is unusable
+            // is on screen rather than arriving as an error after a click.
+            this.state.policy = await server.policy();
+            const res = await server.views();
             this.state.views = (res.Items || []).filter(
                 (v) => v.CollectionType === 'movies' || v.CollectionType === 'tvshows'
             );
@@ -599,6 +617,7 @@ class OfflineSyncManager extends Component {
 
     onServerChange(ev) {
         this.state.serverId = ev.detail ? ev.detail.value : ev.target.value;
+        this.state.policy = null;
         this.state.views = [];
         this.state.viewId = '';
         this.state.items = [];
@@ -633,6 +652,7 @@ class OfflineSyncManager extends Component {
      * and getting them wrong means downloading gigabytes nobody wanted.
      */
     start(item) {
+        if (!this.canDownload()) return;
         const server = this.server();
         // Cleared before anything is read, so a question that fails part way
         // through cannot leave the previous one's answers on screen either.
@@ -1269,6 +1289,22 @@ class OfflineSyncManager extends Component {
                             <button class="act primary" on-click="${() => this.confirmAsk()}">Download</button>
                             <button class="act" on-click="${() => this.cancelAsk()}">Cancel</button>
                         </div>
+                    </div>
+                `)}
+
+                ${when(!this.canDownload(), () => html`
+                    <div class="warn">
+                        <strong>This account cannot download from this server.</strong>
+                        Downloading is a permission your Jellyfin administrator grants per
+                        user, and yours does not have it. Nothing here will work until they
+                        enable it.
+                    </div>
+                `)}
+                ${when(this.canDownload() && !this.canTranscode(), () => html`
+                    <div class="warn">
+                        <strong>This account cannot transcode on this server.</strong>
+                        Anything this browser can play as-is will still download; anything
+                        that would need re-encoding will be refused.
                     </div>
                 `)}
 

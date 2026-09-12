@@ -30,6 +30,10 @@ const FORCED_SUB_ITEM = process.env.JF_FORCED_ITEM || '7eda0c4da7bb755f0e6ef4f6e
 const MULTI_SEASON_SERIES = process.env.JF_SERIES || '2f9ea3e079631ea97fae6ebadb569063';
 // One season, one episode: cheap to hold so later checks have a real series.
 const SMALL_SERIES = process.env.JF_SMALL_SERIES || '5b12d67700af1f19b8764804c7788343';
+// Accounts whose Jellyfin policy withholds one of the two permissions a
+// download needs, so the gate is tested against a real refusal.
+const NO_DOWNLOAD_USER = process.env.JF_NODL_USER || 'qa-nodownload';
+const NO_TRANSCODE_USER = process.env.JF_NOTC_USER || 'qa-notranscode';
 const HEADFUL = !!process.env.HEADFUL;
 
 const results = [];
@@ -1058,6 +1062,62 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     check('a per-episode choice is what gets downloaded',
         perEpisode.skipped || perEpisode.recorded === perEpisode.chose,
         `chose ${perEpisode.chose}, recorded ${perEpisode.recorded}`);
+
+    // Downloading is a permission the Jellyfin administrator grants per user. A
+    // tool that ignored it would let anyone aim a stranger's server at itself.
+    const permissions = await page.evaluate(async (base, noDl, noTc, movieId) => {
+        const { SourceServer } = await import('/web/plugin/source.js');
+        const { downloadItem, assertAllowed } = await import('/web/plugin/downloader.js');
+
+        const signIn = async (name) => {
+            const auth = await (await fetch(base + '/Users/AuthenticateByName', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: 'MediaBrowser Client="gate", Device="gate", DeviceId="gate1", Version="1.0"'
+                },
+                body: JSON.stringify({ Username: name, Pw: 'stdjflib' })
+            })).json();
+            return new SourceServer({
+                id: auth.ServerId + ':' + name, name, url: base,
+                userId: auth.User.Id, token: auth.AccessToken
+            });
+        };
+
+        const blocked = await signIn(noDl);
+        const blockedPolicy = await blocked.policy();
+        let blockedError = null;
+        try {
+            await downloadItem(blocked, await blocked.item(movieId), {});
+        } catch (err) { blockedError = err.message; }
+
+        const noTranscode = await signIn(noTc);
+        const noTranscodePolicy = await noTranscode.policy();
+        let directOk = true;
+        try { await assertAllowed(noTranscode); } catch { directOk = false; }
+        let transcodeError = null;
+        try { await assertAllowed(noTranscode, { transcoding: true }); }
+        catch (err) { transcodeError = err.message; }
+
+        return {
+            blockedPolicy: blockedPolicy.EnableContentDownloading,
+            blockedError,
+            noTranscodePolicy: noTranscodePolicy.EnableVideoPlaybackTranscoding,
+            directOk,
+            transcodeError
+        };
+    }, SOURCE, NO_DOWNLOAD_USER, NO_TRANSCODE_USER, DIRECT_ITEM);
+
+    check('the download permission is read from the server',
+        permissions.blockedPolicy === false, String(permissions.blockedPolicy));
+    check('an account without the download permission is refused',
+        /not allowed to download/i.test(permissions.blockedError || ''),
+        permissions.blockedError || 'the download was allowed');
+    check('an account without the transcode permission may still take originals',
+        permissions.directOk === true && permissions.noTranscodePolicy === false);
+    check('but is refused a download that would need re-encoding',
+        /not allowed to transcode/i.test(permissions.transcodeError || ''),
+        permissions.transcodeError || 'the transcode was allowed');
 
     // ---- 6c. the offline app shell ---------------------------------------
 

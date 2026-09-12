@@ -121,6 +121,21 @@ export class SourceServer {
         return (await this.fetch(u.toString())).json();
     }
 
+    /**
+     * What this user is allowed to do on THIS server, cached per instance.
+     *
+     * Checked because a download is not a read: it asks the server for a whole
+     * file, and a transcoded one asks it to re-encode, repeatedly, for a series.
+     * Somebody who is not permitted to download on their own server must not be
+     * able to do it through this tool either.
+     */
+    async policy() {
+        if (!this._policy) {
+            this._policy = this.json('/Users/Me').then((me) => (me && me.Policy) || {});
+        }
+        return this._policy;
+    }
+
     views() {
         return this.json('/UserViews', { userId: this.userId });
     }

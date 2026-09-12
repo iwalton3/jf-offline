@@ -87,6 +87,29 @@ export async function ensurePersistentStorage() {
     }
 }
 
+/**
+ * Refuse a download the server's own permissions would refuse.
+ *
+ * Enforced here rather than only in the UI, because the UI is a suggestion and
+ * this is the thing that actually issues the requests. `transcoding` is checked
+ * separately: taking an original file costs a server a read, while taking a
+ * transcode costs it an encode per episode, and Jellyfin grants those
+ * separately for exactly that reason.
+ */
+export async function assertAllowed(server, { transcoding } = {}) {
+    const policy = await server.policy();
+    if (policy.EnableContentDownloading === false) {
+        throw new Error('Your account is not allowed to download from this server.');
+    }
+    if (transcoding && policy.EnableVideoPlaybackTranscoding === false
+        && policy.EnablePlaybackRemuxing === false) {
+        throw new Error(
+            'This item needs transcoding and your account is not allowed to transcode on this server.'
+        );
+    }
+    return policy;
+}
+
 /** Containers this browser can hand to a <video> element without a transcode. */
 function directPlayable(container) {
     const c = String(container || '').toLowerCase();
@@ -456,6 +479,7 @@ async function downloadHls(server, dto, mediaSource, row, onProgress, extraParam
  */
 export async function downloadItem(server, reactiveDto, options = {}) {
     const dto = plain(reactiveDto);
+    await assertAllowed(server);
     const onProgress = options.onProgress || (() => {});
     const subtitle = options.subtitle || { mode: S().SUBTITLE_MODE.AUTO };
 
@@ -500,6 +524,9 @@ export async function downloadItem(server, reactiveDto, options = {}) {
     if (!canDirect && !mediaSource.SupportsTranscoding) {
         throw new Error('server can neither stream nor transcode this item');
     }
+    // Re-checked now that the mode is known: an original file and an encode are
+    // different asks and the server grants them separately.
+    if (mode === S().DOWNLOAD_MODE.HLS) await assertAllowed(server, { transcoding: true });
 
     // Already held: do nothing. Re-running a series download then costs only the
     // episodes that are missing, which is what makes topping one up cheap — and it
@@ -630,6 +657,7 @@ export async function downloadItem(server, reactiveDto, options = {}) {
  */
 export async function inspectSubtitles(server, reactiveDto) {
     const dto = plain(reactiveDto);
+    await assertAllowed(server);
     const info = await server.playbackInfo(dto.Id);
     const mediaSource = pickMediaSource(info.MediaSources || []);
     if (!mediaSource) return { tracks: [], audio: [], container: null };
@@ -664,6 +692,7 @@ export async function inspectSubtitles(server, reactiveDto) {
  */
 export async function downloadSeries(server, reactiveSeriesDto, options = {}) {
     const seriesDto = plain(reactiveSeriesDto);
+    await assertAllowed(server);
     const onProgress = options.onProgress || (() => {});
 
     const [seasons, episodes] = await Promise.all([

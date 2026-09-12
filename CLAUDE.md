@@ -146,6 +146,13 @@ HEADFUL=1 ... node tools/smoke.js   # to watch it
   sitting in front of the next one. Anything that is a *result* rather than part
   of the question — the per-episode notes — lives outside it on purpose.
 
+- **A download is not a read, and the server says who may make one.**
+  `EnableContentDownloading` gates any download and
+  `EnableVideoPlaybackTranscoding` gates one that needs re-encoding; Jellyfin
+  grants them separately because they cost the server differently. Enforced in
+  `assertAllowed`, called from the downloader rather than from the UI, because
+  the UI is a suggestion and the downloader is what issues requests.
+
 ## The schema is shaped for features that do not exist yet
 
 `overlay/ps/schema.js` is the single definition, loaded in both the worker and the

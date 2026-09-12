@@ -2,6 +2,11 @@
 
 ## In
 
+- **Respecting the source server's permissions.** An account without Jellyfin's
+  content-downloading permission is refused, and one without transcoding
+  permission may still take originals but not anything needing re-encoding.
+  Enforced in the downloader, where the requests are issued, not only in the UI.
+
 - The phantom server appears as its own server in jellyfin-web, alongside the real
   ones. Sign in as **Offline**, no password.
 - Home, main browse, series and season detail pages.
