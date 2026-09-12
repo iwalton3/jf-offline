@@ -129,7 +129,11 @@ HEADFUL=1 ... node tools/smoke.js   # to watch it
   forced, title — and is resolved against each file by `matchTrack`, which
   declines when two candidates are indistinguishable rather than guessing. Burning
   "index 2" across a season burns whatever happens to be second, which for anime is
-  routinely signs and songs.
+  routinely signs and songs. Declining is not the end of it: a show that cannot be
+  resolved automatically must still be downloadable, so the grid and the bulk
+  rules in `bulkSelect` exist to let a person settle it. The weights in
+  `dialogueWeight` and `signWeight` are ported from jellyfin-mpv-shim's
+  `bulk_subtitle.py` and encode real release-group naming; do not "tidy" them.
 - **A fixed-height scroll container swallows the wheel when it has nothing to
   scroll.** Use `max-height`. And an infinite-scroll handler must check that the
   element can scroll at all, or a list shorter than its box reports zero remaining

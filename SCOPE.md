@@ -24,6 +24,11 @@
   never visited, the download manager included.
 - **Search** over the held library, ranked by where the match falls, plus the
   type-ahead hints the search screen draws first.
+- **Arbitrating tracks per episode.** A show whose episodes disagree about track
+  numbering or naming opens a grid: one row per episode, audio and subtitle
+  pickers, with bulk rules (subbed, dubbed, first track, second track, none) that
+  apply across the set and leave the episodes they do not fit highlighted for the
+  person to fix. The rules are ported from jellyfin-mpv-shim, weights and all.
 - **Picking part of a series**: a single season, or only the episodes not yet
   watched, read from the source server's own watched state.
 - **Trickplay** scrubbing thumbnails, confirmed working against a server that has
@@ -54,10 +59,7 @@
   rather than left truncated, so a retry starts clean.
 - Music, books, photos, live TV.
 - Filtering by genre, year or rating. Search matches names only.
-- Arbitrating subtitle tracks per episode by hand. A series-wide choice is matched
-  per file by language and format; episodes with no unambiguous equivalent are
-  downloaded without burned-in subtitles and listed afterwards, which is a report
-  rather than a prompt.
+
 - Switching audio track or re-picking burned-in subtitles after download. Both are
   fixed at sync time by what the browser can do, and changing either means
   downloading the item again.

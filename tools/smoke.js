@@ -970,6 +970,95 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     check('a text track is never substituted for a picture one',
         matching.wrongKind === null, String(matching.wrongKind));
 
+    // The bulk rules, against track layouts shaped like real release groups.
+    const bulk = await page.evaluate(async () => {
+        const { bulkSelect, dialogueWeight, signWeight } = await import('/web/plugin/downloader.js');
+        const anime = (id, subs) => ({
+            id,
+            audio: [
+                { index: 1, language: 'jpn', title: 'Japanese', codec: 'aac' },
+                { index: 2, language: 'eng', title: 'English', codec: 'aac' },
+                { index: 3, language: 'eng', title: 'English Commentary', codec: 'aac' }
+            ],
+            subtitles: subs
+        });
+        const full = { index: 4, language: 'eng', title: 'Full Dialogue', codec: 'ass', isForced: false, canExtract: true };
+        const signs = { index: 5, language: 'eng', title: 'Signs & Songs', codec: 'ass', isForced: false, canExtract: true };
+        // Second episode has them the other way round and differently numbered.
+        const fullB = { index: 7, language: 'eng', title: 'Main', codec: 'ass', isForced: false, canExtract: true };
+        const signsB = { index: 6, language: 'eng', title: 'OP/ED', codec: 'ass', isForced: false, canExtract: true };
+        const rows = [anime('a', [full, signs]), anime('b', [signsB, fullB])];
+        // A third with no English subtitles at all: no rule can place it.
+        const orphan = { id: 'c', audio: [{ index: 1, language: 'jpn', title: 'Japanese', codec: 'aac' }], subtitles: [] };
+
+        const subbed = bulkSelect([...rows, orphan], 'subbed');
+        const dubbed = bulkSelect(rows, 'dubbed');
+        const track = bulkSelect(rows, 'track', { ordinal: 0 });
+        return {
+            subbedA: subbed.choices.a, subbedB: subbed.choices.b,
+            subbedUnresolved: subbed.unresolved,
+            dubbedA: dubbed.choices.a, dubbedB: dubbed.choices.b,
+            trackA: track.choices.a,
+            dialogueBeatsSigns: dialogueWeight('Full Dialogue') < dialogueWeight('Signs & Songs'),
+            signsAreSigns: signWeight('Signs & Songs') > 0 && signWeight('Full Dialogue') === 0
+        };
+    });
+
+    check('subbed picks original audio with the dialogue track',
+        bulk.subbedA && bulk.subbedA.audioIndex === 1 && bulk.subbedA.subtitleIndex === 4,
+        JSON.stringify(bulk.subbedA));
+    check('subbed follows the track across an episode that renumbered it',
+        bulk.subbedB && bulk.subbedB.audioIndex === 1 && bulk.subbedB.subtitleIndex === 7,
+        JSON.stringify(bulk.subbedB));
+    check('dubbed picks the dub with signs and songs only',
+        bulk.dubbedA && bulk.dubbedA.audioIndex === 2 && bulk.dubbedA.subtitleIndex === 5
+            && bulk.dubbedB.subtitleIndex === 6,
+        `${JSON.stringify(bulk.dubbedA)} / ${JSON.stringify(bulk.dubbedB)}`);
+    check('an episode no rule fits is left for the person to fix',
+        bulk.subbedUnresolved.length === 1 && bulk.subbedUnresolved[0] === 'c',
+        bulk.subbedUnresolved.join(','));
+    check('the dialogue and signs weights order the way they must',
+        bulk.dialogueBeatsSigns && bulk.signsAreSigns);
+    check('picking the nth track ignores language entirely',
+        bulk.trackA && bulk.trackA.subtitleIndex === 4, JSON.stringify(bulk.trackA));
+
+    // The grid's answers have to reach the download, not just the screen.
+    const perEpisode = await page.evaluate(async (pid, seriesId) => {
+        const { knownServers, SourceServer } = await import('/web/plugin/source.js');
+        const { inspectEpisodeTracks, downloadSeries, removeDownload, listDownloads } =
+            await import('/web/plugin/downloader.js');
+        const server = new SourceServer(knownServers(pid)[0]);
+        const dto = await server.item(seriesId);
+        const episodes = ((await server.episodes(seriesId)).Items || []).slice(0, 1);
+        if (!episodes.length) return { skipped: true };
+
+        let progressSeen = 0;
+        const rows = await inspectEpisodeTracks(server, episodes, (done) => { progressSeen = done; });
+
+        const held = await listDownloads();
+        for (const row of held.filter((r) => r.itemId === episodes[0].Id)) await removeDownload(row);
+
+        const audio = rows[0].audio[rows[0].audio.length - 1];
+        await downloadSeries(server, dto, {
+            perEpisode: { [episodes[0].Id]: { audioIndex: audio.index, subtitleIndex: null } }
+        });
+        const row = (await listDownloads()).find((r) => r.itemId === episodes[0].Id);
+        return {
+            progressSeen,
+            tracksRead: rows[0].audio.length,
+            chose: audio.index,
+            recorded: row && row.audioStreamIndex,
+            mode: row && row.mode
+        };
+    }, phantomId, SMALL_SERIES);
+
+    check('the grid reads every episode\'s tracks with progress',
+        perEpisode.skipped || (perEpisode.progressSeen > 0 && perEpisode.tracksRead > 0),
+        perEpisode.skipped ? 'no episodes' : `${perEpisode.tracksRead} audio tracks read`);
+    check('a per-episode choice is what gets downloaded',
+        perEpisode.skipped || perEpisode.recorded === perEpisode.chose,
+        `chose ${perEpisode.chose}, recorded ${perEpisode.recorded}`);
+
     // ---- 6c. the offline app shell ---------------------------------------
 
     const manifest = await page.evaluate(async () => {

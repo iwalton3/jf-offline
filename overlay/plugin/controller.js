@@ -20,7 +20,7 @@ import { knownServers, SourceServer } from '/web/plugin/source.js';
 import {
     downloadItem, downloadSeries, removeDownload, listDownloads,
     ensurePersistentStorage, inspectSubtitles, inspectSeries, inspectSeriesTracks,
-    cancelDownload, cancelAll
+    inspectEpisodeTracks, bulkSelect, cancelDownload, cancelAll
 } from '/web/plugin/downloader.js';
 
 // One request per automatic top-up, which happens when the list is
@@ -31,6 +31,8 @@ const LIST_HEIGHT = 420;
 // Start the next page while this much already-loaded list remains, so the fetch
 // is usually finished before the user reaches the bottom.
 const SCROLL_THRESHOLD = ROW_HEIGHT * 6;
+// Taller than a list row: a grid row carries two dropdowns.
+const GRID_ROW_HEIGHT = 44;
 
 const fmtBytes = (n) => {
     if (!n) return '0 B';
@@ -73,6 +75,13 @@ class OfflineSyncManager extends Component {
         askContainer: '',
         askInconsistent: false,
         askNotes: [],
+        // The per-episode grid, opened on demand because it costs one request
+        // per episode against the source server.
+        gridRows: [],
+        gridChoices: {},
+        gridLoading: false,
+        gridProgress: '',
+        gridUnresolved: 0,
         // Which tree nodes are open, by node id.
         expanded: [],
         items_: null,
@@ -255,6 +264,29 @@ class OfflineSyncManager extends Component {
             color: var(--text-secondary);
         }
         .warn strong { color: #d4b846; font-weight: 600; }
+
+        .grid-row {
+            display: flex; align-items: center; gap: .6em;
+            height: ${GRID_ROW_HEIGHT}px;
+            padding: 0 .7em;
+            border-bottom: 1px solid var(--border-color);
+            box-sizing: border-box; width: 100%;
+        }
+        .grid-row.unresolved { background: rgba(212, 184, 70, .10); }
+        .grid-ep { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .grid-num { flex: none; width: 4.5em; color: var(--text-muted); font-size: 12px; }
+        .grid-row select {
+            flex: none; width: 13em; max-width: 34vw;
+            background: var(--input-bg); color: var(--input-text);
+            border: 1px solid var(--input-border); border-radius: 3px;
+            padding: .25em .4em; font: inherit; font-size: 12px;
+        }
+        .bulkbar { display: flex; flex-wrap: wrap; gap: .5em; align-items: center; margin-bottom: .5em; }
+        @media (max-width: 640px) {
+            .grid-row { gap: .4em; padding: 0 .45em; }
+            .grid-num { display: none; }
+            .grid-row select { width: 9em; }
+        }
 
         .ask {
             border: 1px solid var(--primary-color);
@@ -647,8 +679,10 @@ class OfflineSyncManager extends Component {
         const series = {
             seasonId: this.state.askSeasonId || null,
             unwatchedOnly: this.state.askUnwatchedOnly,
-            quality: this.state.askQuality
+            quality: this.state.askQuality,
+            perEpisode: Object.keys(this.state.gridChoices).length ? this.state.gridChoices : null
         };
+        this.closeGrid();
         this.state.asking = null;
         let subtitle;
         if (choice === 'auto' || choice === 'none') {
@@ -670,6 +704,75 @@ class OfflineSyncManager extends Component {
             }
         }
         this.run(item, subtitle, audioChoice === '' ? null : Number(audioChoice), series);
+    }
+
+    // --- per-episode arbitration ------------------------------------------
+
+    /** Which episodes this download would actually take, so the grid matches it. */
+    async episodesInScope() {
+        const server = this.server();
+        const item = this.state.asking;
+        let list = (await server.episodes(item.Id)).Items || [];
+        if (this.state.askSeasonId) list = list.filter((ep) => ep.SeasonId === this.state.askSeasonId);
+        if (this.state.askUnwatchedOnly) list = list.filter((ep) => !(ep.UserData && ep.UserData.Played));
+        return list;
+    }
+
+    openGrid() {
+        const server = this.server();
+        this.state.gridLoading = true;
+        this.task('Reading tracks', async () => {
+            const list = await this.episodesInScope();
+            const rows = await inspectEpisodeTracks(server, list, (done, total) => {
+                this.state.gridProgress = `${done} of ${total}`;
+            });
+            this.state.gridRows = rows;
+            this.state.gridChoices = {};
+            this.state.gridProgress = '';
+            this.applyBulk('subbed');
+        });
+        this.state.gridLoading = false;
+    }
+
+    closeGrid() {
+        this.state.gridRows = [];
+        this.state.gridChoices = {};
+        this.state.gridUnresolved = 0;
+    }
+
+    applyBulk(mode, opts) {
+        const { choices, unresolved } = bulkSelect(this.state.gridRows, mode, opts || {});
+        // Merged, not replaced: a rule that does not fit an episode leaves the
+        // answer already there rather than wiping it.
+        this.state.gridChoices = Object.assign({}, this.state.gridChoices, choices);
+        this.state.gridUnresolved = unresolved.length;
+    }
+
+    setEpisodeSubtitle(id, value) {
+        const current = this.state.gridChoices[id] || {};
+        this.state.gridChoices = Object.assign({}, this.state.gridChoices, {
+            [id]: Object.assign({}, current, { subtitleIndex: value === '' ? null : Number(value) })
+        });
+    }
+
+    setEpisodeAudio(id, value) {
+        const current = this.state.gridChoices[id] || {};
+        this.state.gridChoices = Object.assign({}, this.state.gridChoices, {
+            [id]: Object.assign({}, current, { audioIndex: value === '' ? null : Number(value) })
+        });
+    }
+
+    /** Grid rows carrying their own current choice, so a memoised row can see it. */
+    gridView() {
+        const choices = this.state.gridChoices;
+        return this.state.gridRows.map((row) => {
+            const choice = choices[row.id] || {};
+            return Object.assign({}, row, {
+                subtitleIndex: choice.subtitleIndex == null ? '' : String(choice.subtitleIndex),
+                audioIndex: choice.audioIndex == null ? '' : String(choice.audioIndex),
+                resolved: choice.subtitleIndex != null || choice.audioIndex != null
+            });
+        });
     }
 
     onAskQualityChange(ev) {
@@ -740,7 +843,8 @@ class OfflineSyncManager extends Component {
                     subtitle, audioStreamIndex, onProgress,
                     seasonId: series.seasonId,
                     unwatchedOnly: series.unwatchedOnly,
-                    quality: series.quality
+                    quality: series.quality,
+                    perEpisode: series.perEpisode
                 });
                 if (result.failures.length) {
                     this.state.error = `${result.failures.length} of ${result.episodes} episodes failed: `
@@ -851,6 +955,39 @@ class OfflineSyncManager extends Component {
                 <span class="name">${node.title}</span>
                 <span class="tag">${node.count} items · ${fmtBytes(node.bytes)}</span>
                 <button class="act" on-click="${(ev) => this.removeGroup(ev, node)}">Remove ${label}</button>
+            </div>
+        `;
+    }
+
+    /**
+     * One episode in the arbitration grid.
+     *
+     * Plain <select> rather than cl-dropdown: there is one of these per episode
+     * and per track column, and an overlay-based dropdown inside a windowed list
+     * that recycles its rows is a fight not worth having.
+     */
+    renderGridRow(row) {
+        const label = (row.season != null && row.index != null)
+            ? `S${String(row.season).padStart(2, '0')}E${String(row.index).padStart(2, '0')}`
+            : '';
+        return html`
+            <div class="grid-row ${row.resolved ? '' : 'unresolved'}">
+                <span class="grid-num">${label}</span>
+                <span class="grid-ep">${row.name}</span>
+                <select aria-label="Audio" on-change="${(ev) => this.setEpisodeAudio(row.id, ev.target.value)}">
+                    <option value="" selected="${row.audioIndex === ''}">Audio: default</option>
+                    ${each(row.audio, (a) => html`
+                        <option value="${a.index}" selected="${row.audioIndex === String(a.index)}">${a.title}</option>
+                    `)}
+                </select>
+                <select aria-label="Subtitles" on-change="${(ev) => this.setEpisodeSubtitle(row.id, ev.target.value)}">
+                    <option value="" selected="${row.subtitleIndex === ''}">Subtitles: none burned</option>
+                    ${each(row.subtitles, (t) => html`
+                        <option value="${t.index}" selected="${row.subtitleIndex === String(t.index)}">
+                            ${t.title} (${t.codec})
+                        </option>
+                    `)}
+                </select>
             </div>
         `;
     }
@@ -1056,6 +1193,48 @@ class OfflineSyncManager extends Component {
                                     on-change="${(ev) => this.onAskAudioChange(ev)}"></cl-dropdown>
                             </div>
                         `)}
+                        ${when(s.askSeasons.length > 0, () => html`
+                            <div>
+                                <div class="bulkbar">
+                                    ${when(!s.gridRows.length, () => html`
+                                        <button class="act" on-click="${() => this.openGrid()}">
+                                            Choose tracks per episode
+                                        </button>
+                                        <span class="note">
+                                            ${s.gridProgress || 'Reads every episode from your server, once.'}
+                                        </span>
+                                    `)}
+                                    ${when(s.gridRows.length > 0, () => html`
+                                        <span class="note">Apply to all:</span>
+                                        <button class="act" on-click="${() => this.applyBulk('subbed')}">Subbed</button>
+                                        <button class="act" on-click="${() => this.applyBulk('dubbed')}">Dubbed</button>
+                                        <button class="act" on-click="${() => this.applyBulk('track', { ordinal: 0 })}">First track</button>
+                                        <button class="act" on-click="${() => this.applyBulk('track', { ordinal: 1 })}">Second track</button>
+                                        <button class="act" on-click="${() => this.applyBulk('none')}">None</button>
+                                        <button class="act" on-click="${() => this.closeGrid()}">Close</button>
+                                    `)}
+                                </div>
+                                ${when(s.gridUnresolved > 0, () => html`
+                                    <div class="warn">
+                                        <strong>${s.gridUnresolved} episode(s) did not fit that rule.</strong>
+                                        They are highlighted below; set them by hand, or apply a
+                                        different rule. A rule never overwrites an answer it cannot
+                                        improve on.
+                                    </div>
+                                `)}
+                                ${when(s.gridRows.length > 0, () => html`
+                                    <div class="panel scroller">
+                                        <cl-virtual-list
+                                            items="${this.gridView()}"
+                                            itemHeight="${GRID_ROW_HEIGHT}"
+                                            scrollContainer="parent"
+                                            renderItem="${(row) => this.renderGridRow(row)}"
+                                            keyFn="${(row) => row.id + ':' + row.subtitleIndex + ':' + row.audioIndex}"></cl-virtual-list>
+                                    </div>
+                                `)}
+                            </div>
+                        `)}
+
                         <div class="row">
                             <button class="act primary" on-click="${() => this.confirmAsk()}">Download</button>
                             <button class="act" on-click="${() => this.cancelAsk()}">Cancel</button>

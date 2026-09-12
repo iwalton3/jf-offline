@@ -696,9 +696,21 @@ export async function downloadSeries(server, reactiveSeriesDto, options = {}) {
         if (seriesCancelled) break;
         onProgress(i, list.length, 'episodes', list[i].Name);
         try {
+            // A per-episode choice, where one was made, beats the series-wide one:
+            // it is the answer a person gave about this exact file.
+            const override = (options.perEpisode || {})[list[i].Id];
+            const subtitle = override
+                ? (override.subtitleIndex == null
+                    ? { mode: 'auto' }
+                    : { mode: 'burn', index: override.subtitleIndex })
+                : options.subtitle;
+            const audioStreamIndex = override && override.audioIndex != null
+                ? override.audioIndex
+                : options.audioStreamIndex;
+
             const row = await downloadItem(server, list[i], {
-                subtitle: options.subtitle,
-                audioStreamIndex: options.audioStreamIndex,
+                subtitle,
+                audioStreamIndex,
                 quality: options.quality
             });
             if (row && row.subtitleNote) notes.push({ name: list[i].Name, note: row.subtitleNote });
@@ -744,6 +756,177 @@ export async function inspectSeriesTracks(server, episodes, sampleSize = 4) {
     const first = shape(seen[0].tracks);
     const consistent = seen.every((e) => shape(e.tracks) === first);
     return { sampled: seen.length, consistent, shape: seen[0].tracks, seen };
+}
+
+/* ---------------------------------------------------------------------------
+ * Bulk track selection.
+ *
+ * Ported from jellyfin-mpv-shim's bulk_subtitle.py, weights and all, because it
+ * is the same problem and those weights encode real release-group conventions
+ * rather than a guess. Two modes plus a manual one:
+ *
+ *   subbed  original-language audio with the full dialogue subtitles
+ *   dubbed  dubbed audio with only the signs and songs track
+ *
+ * The language pair defaults to Japanese audio and English subtitles, which is
+ * the case this exists for; mpv-shim carries the same limitation and says so.
+ * ------------------------------------------------------------------------- */
+
+const lower = (v) => String(v == null ? '' : v).toLowerCase();
+
+/** How good a candidate this is for FULL dialogue. Lower is better. */
+export function dialogueWeight(text) {
+    if (!text) return 900;
+    const t = lower(text);
+    const hasDialogue = t.includes('main') || t.includes('full') || t.includes('dialogue');
+    const hasSongs = t.includes('op/ed') || t.includes('song') || t.includes('lyric');
+    const hasSigns = t.includes('sign');
+    const vendor = t.includes('bd') || t.includes('retail');
+    let weight = 900;
+    if (hasDialogue && hasSongs) weight -= 100;
+    if (hasSongs) weight += 200;
+    if (hasDialogue && hasSigns) weight -= 100;
+    else if (hasSigns) weight += 700;
+    if (vendor) weight += 50;
+    return weight;
+}
+
+/** How good a candidate this is for SIGNS AND SONGS. Zero means "not one". */
+export function signWeight(text) {
+    if (!text) return 0;
+    const t = lower(text);
+    const hasSongs = t.includes('op/ed') || t.includes('song') || t.includes('lyric');
+    const hasSigns = t.includes('sign');
+    const vendor = t.includes('bd') || t.includes('retail');
+    if (!(hasSongs || hasSigns)) return 0;
+    let weight = 900;
+    if (hasSongs) weight -= 200;
+    if (hasSigns) weight -= 300;
+    if (vendor) weight += 50;
+    return weight;
+}
+
+const isLanguage = (track, code, word) =>
+    lower(track.language) === code || lower(track.title).includes(word);
+
+/** Original-language audio plus full dialogue subtitles. */
+export function pickSubbed(row, opts = {}) {
+    const audioCode = opts.audioLanguage || 'jpn';
+    const audioWord = opts.audioWord || 'japan';
+    const subCode = opts.subtitleLanguage || 'eng';
+    const subWord = opts.subtitleWord || 'english';
+
+    const audio = row.audio.find((a) =>
+        isLanguage(a, audioCode, audioWord) && !lower(a.title).includes('commentary'));
+
+    let subtitle = null;
+    let best = null;
+    for (const track of row.subtitles) {
+        if (!isLanguage(track, subCode, subWord)) continue;
+        if (track.isForced) continue;
+        const weight = dialogueWeight(track.title);
+        if (best === null || weight < best) { best = weight; subtitle = track; }
+    }
+    // Both or neither: a subbed selection with no subtitles is not subbed.
+    if (audio && subtitle) return { audioIndex: audio.index, subtitleIndex: subtitle.index };
+    return null;
+}
+
+/** Dubbed audio plus signs and songs only, which may legitimately be absent. */
+export function pickDubbed(row, opts = {}) {
+    const code = opts.audioLanguage || 'eng';
+    const word = opts.audioWord || 'english';
+
+    const audio = row.audio.find((a) =>
+        isLanguage(a, code, word) && !lower(a.title).includes('commentary'));
+    if (!audio) return null;
+
+    let subtitle = null;
+    let best = null;
+    for (const track of row.subtitles) {
+        if (!isLanguage(track, code, word)) continue;
+        if (track.isForced) { subtitle = track; break; }
+        const weight = signWeight(track.title);
+        if (weight === 0) continue;
+        if (best === null || weight < best) { best = weight; subtitle = track; }
+    }
+    return { audioIndex: audio.index, subtitleIndex: subtitle ? subtitle.index : null };
+}
+
+/**
+ * Apply one bulk rule across a set of episodes.
+ *
+ * Returns a choice per episode and, deliberately, leaves an episode alone when
+ * the rule does not fit it: that is the row a person then fixes by hand, and
+ * pretending otherwise is how the wrong track gets burned into a whole season.
+ */
+export function bulkSelect(rows, mode, opts = {}) {
+    const out = {};
+    const unresolved = [];
+    for (const row of rows) {
+        let choice = null;
+        if (mode === 'subbed') choice = pickSubbed(row, opts);
+        else if (mode === 'dubbed') choice = pickDubbed(row, opts);
+        else if (mode === 'none') choice = { audioIndex: null, subtitleIndex: null };
+        else if (mode === 'track') {
+            const nth = row.subtitles[opts.ordinal || 0];
+            choice = nth ? { audioIndex: null, subtitleIndex: nth.index } : null;
+        } else if (mode === 'language') {
+            const hit = row.subtitles.filter((t) => lower(t.language) === lower(opts.language));
+            choice = hit.length === 1 ? { audioIndex: null, subtitleIndex: hit[0].index } : null;
+        }
+        if (choice) out[row.id] = choice;
+        else unresolved.push(row.id);
+    }
+    return { choices: out, unresolved };
+}
+
+/**
+ * Every episode's tracks, which is what a per-episode grid needs.
+ *
+ * One PlaybackInfo per episode is a lot to ask of a server, so it is only done
+ * when somebody opens the grid, and with a small concurrency and a progress
+ * callback rather than sixty requests at once.
+ */
+export async function inspectEpisodeTracks(server, episodes, onProgress = () => {}, concurrency = 4) {
+    const rows = new Array(episodes.length);
+    let cursor = 0;
+    let done = 0;
+
+    const worker = async () => {
+        for (;;) {
+            const i = cursor++;
+            if (i >= episodes.length) return;
+            const episode = episodes[i];
+            let subtitles = [];
+            let audio = [];
+            let container = null;
+            try {
+                const info = await server.playbackInfo(episode.Id);
+                const ms = pickMediaSource(info.MediaSources || []);
+                if (ms) {
+                    subtitles = subtitleOptions(ms);
+                    audio = audioOptions(ms);
+                    container = ms.Container;
+                }
+            } catch (err) {
+                console.warn('[phantom] tracks', episode.Name, err.message);
+            }
+            rows[i] = {
+                id: episode.Id,
+                name: episode.Name,
+                season: episode.ParentIndexNumber,
+                index: episode.IndexNumber,
+                seasonId: episode.SeasonId,
+                subtitles,
+                audio,
+                container
+            };
+            onProgress(++done, episodes.length);
+        }
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrency, episodes.length || 1) }, worker));
+    return rows.filter(Boolean);
 }
 
 /** Seasons and episode counts, for the question asked before a series download. */
