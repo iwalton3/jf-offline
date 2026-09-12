@@ -1,5 +1,56 @@
 # v0 scope
 
+## The contract
+
+What settles a disagreement about this project, stated by the owner: **conformance
+to the Jellyfin API, coherent technical design of the internals, and the UI
+contract already agreed.** Everything else is malleable. A rule that cannot name
+which of those three settles it is not ready to be applied.
+
+Answers the owner has given, so nothing has to be re-derived from the code that
+would be judged by them:
+
+- **The storage figure accounts for every byte on disk.** "Downloads are using X"
+  on the settings page means all of it — media, subtitles, embedded fonts,
+  trickplay tiles and artwork, including a series' and a season's artwork, which
+  belongs to no row in the list. A figure that counts the media transfer alone is
+  wrong even when deletion is perfect.
+- **A second question is refused, structurally.** While one download question is
+  being inspected or confirmed, the control that starts another is disabled
+  rather than left live to be ignored. Refusing in the handler and leaving the
+  picker pressable is the shape that produced a silent no-op.
+- **A cancelled download leaves nothing a later read can see**, wherever in the
+  download the cancel landed. This is the promise; "never recorded COMPLETE" was
+  a narrower one that the code stopped keeping. `CLAUDE.md` carries the long
+  version and the supersession.
+
+## What a UserDataChanged push contains
+
+Measured against a real Jellyfin 12.0.0 with `tools/userdata-probe.py`, not read
+out of jellyfin-web. Marking one episode of a multi-episode series played:
+
+| entry | what it carried |
+| --- | --- |
+| the episode | `Played`, `PlayCount`, `PlaybackPositionTicks`, `IsFavorite`, `LastPlayedDate` |
+| one ancestor | `Played` false, `PlayCount` 0, `PlaybackPositionTicks` 0, `IsFavorite`, `PlayedPercentage`, `UnplayedItemCount` |
+
+Read: **an ancestor's entry is counted over its own children and carries nothing
+of the child's.** No `LastPlayedDate` on the ancestor, and its `PlayedPercentage`
+is a fraction of episodes rather than a position in a file — 12.5 for one of
+eight, where an episode's own percentage is a position over a runtime.
+
+Which ancestor the server picks is the item's own parent in the database, which
+is not always the one an episode's DTO names: a show with season folders gets a
+`Season` entry, and a flat show whose season is virtual gets a `Series` entry.
+**The phantom deliberately pushes every ancestor it holds instead of one**, both
+season and series, because it has no other way to refresh a Series card and
+jellyfin-web applies each entry only to the card whose `data-id` matches it.
+Each entry still has to describe the item it names.
+
+`api_key` in the query string is refused on `/socket` with a 403, the same way
+12.0.0 refuses it on `/Items/{id}/Download` and the HLS playlist endpoints. The
+token has to travel in the `Authorization` header.
+
 ## In
 
 - **Respecting the source server's permissions.** An account without Jellyfin's
