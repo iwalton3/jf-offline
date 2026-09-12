@@ -7,6 +7,29 @@
 
     const S = g.PS_SCHEMA;
 
+    // The two ways this build and the stored database can disagree about a
+    // version, and the only sentences anybody shows a person about either. One
+    // table, because three surfaces observe this failure -- a navigation, a
+    // request to the phantom server and the settings page -- and three surfaces
+    // inventing their own wording is three chances to describe it wrongly.
+    //
+    // Neither arm is legible in IndexedDB's own terms: `blocked` carries no
+    // message at all, and a VersionError says "The requested version (2) is less
+    // than the existing version (3)", which names numbers the person has never
+    // seen and no action they can take.
+    const UNOPENABLE = {
+        blocked: 'Another tab is still running the previous version of this app, '
+            + 'and it is holding the downloads open. Close the other tabs and reload.',
+        obsolete: 'This tab is running an older version of the app than the one '
+            + 'that stored your downloads. Reload to pick it up.'
+    };
+
+    const fault = (kind, cause) => Object.assign(new Error(UNOPENABLE[kind]),
+        { unopenable: kind, cause });
+
+    /** Which disagreement an error is, or null when it is some other failure. */
+    const unopenable = (err) => (err && err.unopenable) || null;
+
     // Memoised, but a failure is forgotten rather than cached. A denied storage
     // permission or a blocked upgrade used to poison every later call for the
     // lifetime of the worker, and the worker answers navigations from this.
@@ -45,8 +68,9 @@
             };
             resolve(req.result);
         };
-        req.onerror = () => reject(req.error);
-        req.onblocked = () => reject(new Error('phantom db upgrade blocked by another tab'));
+        req.onerror = () => reject(req.error && req.error.name === 'VersionError'
+            ? fault('obsolete', req.error) : req.error);
+        req.onblocked = () => reject(fault('blocked'));
     }));
 
     const wrap = (req) => new Promise((resolve, reject) => {
@@ -109,5 +133,5 @@
         });
     }
 
-    g.PS_DB = { open, tx, wrap, get, put, del, all, allByIndex, putMany, meta, getUserData, journal };
+    g.PS_DB = { open, unopenable, tx, wrap, get, put, del, all, allByIndex, putMany, meta, getUserData, journal };
 })(self);

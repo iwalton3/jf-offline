@@ -122,8 +122,49 @@ if (IS_SERVICE_WORKER) {
         }
     }
 
+    /**
+     * The answer when the store and this build disagree about a version.
+     *
+     * A navigation gets a document rather than a status, because the measured
+     * alternative is the browser's own error page -- `TypeError: Failed to
+     * fetch`, with nothing of ours on it and no way for the person to learn that
+     * another tab is the whole problem. The app shell reads the live cache name
+     * out of the store, so this failure takes every page down, not just the ones
+     * that need the library.
+     *
+     * The sentence comes from ps/db.js. Nothing here writes its own.
+     */
+    function unopenableResponse(err, navigation) {
+        const headers = { 'Cache-Control': 'no-store' };
+        if (!navigation) {
+            headers['Content-Type'] = 'text/plain; charset=utf-8';
+            return new Response(err.message, { status: 503, headers });
+        }
+        headers['Content-Type'] = 'text/html; charset=utf-8';
+        const body = '<!doctype html><meta charset="utf-8">'
+            + '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            + '<title>Offline library unavailable</title>'
+            + '<style>'
+            + 'body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;'
+            + 'background:#101010;color:#eee;font:16px/1.5 system-ui,sans-serif;padding:24px}'
+            + 'main{max-width:32em}h1{font-size:1.3rem;font-weight:600;margin:0 0 .6em}'
+            + 'p{margin:0 0 1em}button{font:inherit;padding:.5em 1.2em;border:0;border-radius:4px;'
+            + 'background:#00a4dc;color:#fff;cursor:pointer}'
+            + '</style>'
+            + '<main><h1>Offline library unavailable</h1>'
+            + '<p>' + err.message + '</p>'
+            + '<button onclick="location.reload()">Reload</button></main>';
+        return new Response(body, { status: 503, headers });
+    }
+
     async function appShell(request, url, waitUntil) {
-        const cache = await activeCache();
+        let cache;
+        try {
+            cache = await activeCache();
+        } catch (err) {
+            if (!self.PS_DB.unopenable(err)) throw err;
+            return unopenableResponse(err, isNavigation(request, url));
+        }
         // Navigations are keyed on the document itself, which is the name the
         // manifest uses, so a precached cache already holds the entry a
         // navigation will look for.

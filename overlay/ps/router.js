@@ -327,7 +327,11 @@
                 return await handler(ctx, ...m.slice(1));
             } catch (err) {
                 console.error('[phantom]', request.method, url.pathname, err);
-                return json({ error: String(err && err.message || err) }, { status: 500 });
+                // A version disagreement is not this request going wrong, it is
+                // the store being unreachable until the person does something.
+                // 503 and db.js's sentence, the same one the app shell serves.
+                return json({ error: String(err && err.message || err) },
+                    { status: DB.unopenable(err) ? 503 : 500 });
             }
         }
 

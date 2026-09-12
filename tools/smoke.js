@@ -2427,6 +2427,42 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     check('and the memo does not go on handing out the closed connection',
         versionUpgrade.after === 'ok', String(versionUpgrade.after));
 
+    // ---- 12. and the app says so ------------------------------------------
+    //
+    // Section 11 leaves the store at a version this build cannot open, which is
+    // where a person lands when one tab takes an update and another does not.
+    // Measured at the parent commit: a navigation ended as `TypeError: Failed to
+    // fetch`, which is the browser's own error page with nothing of ours on it,
+    // and an API call carried IndexedDB's own sentence -- "The requested version
+    // (2) is less than the existing version (3)" -- which names numbers the
+    // person has never seen and no action they can take.
+    //
+    // The other arm of the same disagreement, an upgrade blocked by a tab that
+    // has not let go, is not reachable from a build pinned at one version: to be
+    // blocked, this build would have to be the one asking for the higher number.
+    // It shares the branch these two checks exercise.
+    const unopenable = await page.evaluate(async () => {
+        const at = async (path) => {
+            try {
+                const res = await fetch(path);
+                return { status: res.status, body: await res.text() };
+            } catch (err) {
+                return { threw: err.name + ': ' + err.message };
+            }
+        };
+        return { navigation: await at('/web/index.html'), api: await at('/Items?Recursive=true&Limit=1') };
+    });
+
+    // The sentence, not the status: a 503 with the browser's own wording on it is
+    // the failure this rule exists to remove. The document carries a stylesheet
+    // ahead of its text, so match the whole body and truncate only for reporting.
+    const saysWhy = (r) => r.status === 503 && /older version of the app/.test(r.body || '');
+    const how = (r) => r.threw || `${r.status}: ${(r.body || '').replace(/<style>[^]*?<\/style>/, '').slice(0, 160)}`;
+    check('a navigation says why the library cannot be opened',
+        saysWhy(unopenable.navigation), how(unopenable.navigation));
+    check('and so does a request to the phantom server',
+        saysWhy(unopenable.api), how(unopenable.api));
+
     if (HEADFUL) await sleep(600000);
     await browser.close();
 
