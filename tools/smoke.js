@@ -1472,6 +1472,20 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     patched.present ? patched.opened === true : true,
     patched.present ? 'patch present' : 'stock jellyfin-web');
 
+    // An update has to reach the user rather than sitting installed forever.
+    const updates = await page.evaluate(async () => {
+        const reg = await navigator.serviceWorker.getRegistration();
+        return {
+            bridge: !!(window.__phantom && window.__phantom.onUpdate),
+            checksOnLoad: typeof reg.update === 'function',
+            waiting: !!(window.__phantom && window.__phantom.update
+                && typeof window.__phantom.update.waiting === 'boolean')
+        };
+    });
+    check('the page checks for a worker update and can report one',
+        updates.bridge && updates.checksOnLoad && updates.waiting,
+        JSON.stringify(updates));
+
     // ---- 9. the socket shim ----------------------------------------------
 
     const socket = await page.evaluate(async (itemId) => {

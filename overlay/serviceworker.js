@@ -59,8 +59,12 @@ const CACHE_PREFIX = 'phantom-app-';
 const BOOTSTRAP_CACHE = CACHE_PREFIX + 'runtime';
 
 if (IS_SERVICE_WORKER) {
-    self.addEventListener('install', (event) => {
-        event.waitUntil(self.skipWaiting());
+    self.addEventListener('install', () => {
+        // NOT inside event.waitUntil(). skipWaiting() resolves only once the
+        // worker has actually skipped waiting, and install is not finished until
+        // its waitUntil settles — measured here, an updated worker installed and
+        // then sat in `waiting` across every reload, still serving the old code.
+        self.skipWaiting();
     });
 
     /** The cache the app is currently served from. */
@@ -302,6 +306,13 @@ if (IS_SERVICE_WORKER) {
         const data = event.data;
         if (!data || !data.__phantom) return;
 
+        if (data.kind === 'skip-waiting') {
+            // An update waits by default, and an app left open for a week would
+            // run last week's code. The page asks for this on load; see
+            // ps-bootstrap.js for why the page, and not install(), decides.
+            self.skipWaiting();
+            return;
+        }
         if (data.kind === 'ping') {
             event.source.postMessage({ __phantom: true, kind: 'pong' });
             return;

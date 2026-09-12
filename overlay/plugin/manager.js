@@ -113,7 +113,8 @@ class OfflineSyncManager extends Component {
         itemFilter: '',
         heldFilter: '',
         // What the selected server's account is permitted to do.
-        policy: null
+        policy: null,
+        updateWaiting: false
     }, askDefaults());
 
     static styles = /*css*/`
@@ -332,6 +333,12 @@ class OfflineSyncManager extends Component {
         }
         await this.refreshDownloads();
 
+        if (window.__phantom && window.__phantom.onUpdate) {
+            this._offUpdate = window.__phantom.onUpdate((u) => {
+                this.state.updateWaiting = !!u.waiting;
+            });
+        }
+
         if (window.__phantom && window.__phantom.onPrecache) {
             this._offPrecache = window.__phantom.onPrecache((p) => {
                 this.state.precache = { done: p.done, total: p.total };
@@ -342,6 +349,7 @@ class OfflineSyncManager extends Component {
 
     unmounted() {
         if (this._offPrecache) this._offPrecache();
+        if (this._offUpdate) this._offUpdate();
     }
 
     /**
@@ -1187,6 +1195,14 @@ class OfflineSyncManager extends Component {
                     <div class="warn">
                         <strong>${s.notes.length} episode(s) could not use the subtitle track you chose.</strong>
                         ${s.notes.slice(0, 6).map((n) => n.name).join(', ')}${s.notes.length > 6 ? '…' : ''}
+                    </div>
+                `)}
+
+                ${when(s.updateWaiting, () => html`
+                    <div class="warn">
+                        <strong>An update is ready.</strong>
+                        It has downloaded and will be running the next time you open the app.
+                        Reloading now applies it.
                     </div>
                 `)}
 

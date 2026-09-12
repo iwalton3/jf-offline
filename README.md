@@ -168,6 +168,15 @@ tools/
 in the worker, and `<script>` tags the worker injects into `index.html` for the
 page — so the downloader and the server share one schema rather than two copies.
 
+## Updating
+
+The site auto-updates: the app asks for a worker update on every load, and a
+change to anything the worker imports is detected. **It applies on the load
+after the one that finds it** — the first installs the new worker, the next runs
+it — so a restart picks up a deploy. The settings page says when an update is
+waiting rather than leaving it to folklore. `tools/check-update.js` measures the
+behaviour against a running dev host.
+
 ## Things that will surprise you
 
 - **`serviceworker.js` is also loaded as an ordinary page script.** jellyfin-web's

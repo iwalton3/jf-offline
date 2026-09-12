@@ -131,6 +131,7 @@
     // worker part-way through two thousand fetches will be killed and only wakes
     // again when something sends it an event.
     const precache = { done: 0, total: 0, version: null, listeners: new Set() };
+    const update = { waiting: false, listeners: new Set() };
 
     const announce = () => {
         for (const fn of precache.listeners) {
@@ -153,7 +154,76 @@
         tellWorker('precache');
     };
 
+    /**
+     * Take an update on the next load, rather than whenever every tab happens to
+     * close.
+     *
+     * A service worker update installs and then WAITS. Measured against Chrome
+     * 121 with this app: changing a file the worker imports is detected and a new
+     * worker installs, but skipWaiting() does NOT promote it — not from the
+     * install handler and not from a message, even though the waiting worker
+     * demonstrably receives messages and replies to them. What does promote it is
+     * the next navigation, when the page being replaced leaves no clients behind.
+     *
+     * So the measured behaviour is: the load that finds the update installs it,
+     * and the load after that runs it. That is one restart later than ideal, so
+     * calling update() here matters — it makes the check happen on this load
+     * instead of whenever the browser next feels like it, which is the difference
+     * between "applies on the next start" and "applies eventually". The skip
+     * request is kept because it costs nothing and other engines honour it, and
+     * the waiting flag is surfaced so the settings page can say so out loud.
+     */
+    function adoptUpdates() {
+        const sw = g.navigator.serviceWorker;
+        if (!sw) return;
+
+        const RELOAD_GUARD = 'phantom-reloaded-for-update';
+        sw.addEventListener('controllerchange', () => {
+            // Once per takeover. Without the guard a worker that keeps replacing
+            // itself would reload the page forever.
+            if (sessionStorage.getItem(RELOAD_GUARD)) return;
+            try { sessionStorage.setItem(RELOAD_GUARD, '1'); } catch { /* private mode */ }
+            g.location.reload();
+        });
+
+        sw.ready.then((reg) => {
+            const nudge = () => {
+                if (!reg.waiting) return false;
+                reg.waiting.postMessage({ __phantom: true, kind: 'skip-waiting' });
+                return true;
+            };
+
+            // Polled as well as event-driven. The update check is asynchronous and
+            // `updatefound` can fire with `installing` already moved on, so relying
+            // on the event alone left the new worker waiting until the load after
+            // next — two restarts to pick up one change.
+            let attempts = 0;
+            const watch = setInterval(() => {
+                if (reg.waiting && !update.waiting) {
+                    update.waiting = true;
+                    for (const fn of update.listeners) {
+                        try { fn(update); } catch (err) { console.error('[phantom]', err); }
+                    }
+                }
+                if (nudge() || ++attempts > 20) clearInterval(watch);
+            }, 1000);
+
+            reg.addEventListener('updatefound', () => {
+                const installing = reg.installing;
+                if (!installing) return;
+                installing.addEventListener('statechange', () => {
+                    if (installing.state === 'installed') nudge();
+                });
+            });
+
+            // The browser checks on navigation anyway; asking explicitly makes the
+            // check happen even in a tab that has been open for days.
+            reg.update().catch(() => {});
+        }).catch(() => {});
+    }
+
     g.addEventListener('load', () => {
+        adoptUpdates();
         tellWorker('precache-status');
         poke();
         setInterval(poke, 15000);
@@ -172,6 +242,12 @@
             fn(precache);
             return () => precache.listeners.delete(fn);
         },
-        refreshPrecache: () => tellWorker('precache-status')
+        refreshPrecache: () => tellWorker('precache-status'),
+        update,
+        onUpdate: (fn) => {
+            update.listeners.add(fn);
+            fn(update);
+            return () => update.listeners.delete(fn);
+        }
     };
 })(window);

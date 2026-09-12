@@ -168,6 +168,16 @@ HEADFUL=1 ... node tools/smoke.js   # to watch it
   4.4 GB actually written. The settings page sums the download rows instead,
   which is the number the list adds up to.
 
+- **A worker update applies on the load AFTER the one that finds it.** Changing a
+  file the worker imports is detected — Chrome re-fetches imported scripts and
+  byte-compares them — and a new worker installs and then waits. `skipWaiting()`
+  does not promote it here, from the install handler or from a message, even
+  though the waiting worker demonstrably receives messages and replies. The next
+  navigation promotes it, because the page being replaced leaves no clients.
+  `tools/check-update.js` measures this; `ps-bootstrap.js` calls `update()` on
+  load so the check happens promptly, which is the difference between "next
+  start" and "eventually", and surfaces a waiting update so the page can say so.
+
 ## The schema is shaped for features that do not exist yet
 
 `overlay/ps/schema.js` is the single definition, loaded in both the worker and the

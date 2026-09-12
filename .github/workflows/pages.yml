@@ -123,6 +123,26 @@ jobs:
           print(f"manifest {manifest['version']}: {len(manifest['files'])} files, all present")
           PY
 
+      - name: Package the bundle for self-hosting
+        run: |
+          # The same assembled tree, at an origin root rather than a
+          # subdirectory, for anyone who wants to drop it in place of their own
+          # jellyfin-web. Built separately because the base path is baked into
+          # index.html and the precache manifest.
+          python3 overlay-repo/tools/build-site.py \
+            --webroot jellyfin-web/dist \
+            --out _bundle \
+            --base-path ""
+          (cd _bundle && zip -qr ../jf-offline-bundle.zip .)
+          ls -lh jf-offline-bundle.zip
+
+      - name: Upload the self-hosting bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: jf-offline-bundle
+          path: jf-offline-bundle.zip
+          retention-days: 30
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
