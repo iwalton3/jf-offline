@@ -111,10 +111,46 @@
     WebSocketShim.CLOSED = 3;
     g.WebSocket = WebSocketShim;
 
+    /**
+     * Mark the phantom user's entries in jellyfin-web's query cache stale, or the
+     * home page draws the old library for up to a minute after a download or a
+     * removal. No server message reaches those keys (CLAUDE.md, "The home page is
+     * drawn from jellyfin-web's query cache"), so the client is taken from the
+     * `client` prop of the provider at the top of #reactRoot. That is React's
+     * internals rather than a seam, which is why not finding it only logs.
+     */
+    function invalidateAppQueries() {
+        try {
+            const root = g.document.getElementById('reactRoot');
+            const key = root && Object.keys(root).find((k) => k.startsWith('__reactContainer$'));
+            const stack = key ? [root[key]] : [];
+            for (let seen = 0; stack.length && seen < 200; seen++) {
+                const fiber = stack.pop();
+                const client = fiber.memoizedProps && fiber.memoizedProps.client;
+                if (client && typeof client.invalidateQueries === 'function') {
+                    // Stale rather than removed, so a grid on screen keeps its
+                    // cards until the refetch replaces them.
+                    Promise.resolve(client.invalidateQueries({ queryKey: ['User', g.PS_SCHEMA.ID.USER] }))
+                        .catch((err) => console.warn('[phantom] refetch after a library change failed', err));
+                    return;
+                }
+                if (fiber.sibling) stack.push(fiber.sibling);
+                if (fiber.child) stack.push(fiber.child);
+            }
+            console.warn('[phantom] jellyfin-web\'s query cache was not found;'
+                + ' the home page may show the old library for up to a minute');
+        } catch (err) {
+            console.warn('[phantom] could not mark jellyfin-web\'s query cache stale', err);
+        }
+    }
+
     if (g.navigator.serviceWorker) {
         g.navigator.serviceWorker.addEventListener('message', (event) => {
             const data = event.data;
             if (!data || !data.__phantom || data.kind !== 'socket') return;
+            // Whether or not a socket is open: the tab may be browsing a real
+            // server, and its cache still holds the phantom's home page.
+            if (data.message && data.message.MessageType === 'LibraryChanged') invalidateAppQueries();
             for (const socket of live) socket.deliver(data.message);
         });
     }
