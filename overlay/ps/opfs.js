@@ -94,10 +94,43 @@
         }
     }
 
+    /**
+     * Every file under the phantom root, as `{ path, size }`.
+     *
+     * The only instrument that can see a directory nothing points at any more: a
+     * download row, an item row and an image directory have three different
+     * lifetimes, and a grep over the write and remove calls cannot tell which of
+     * them a given tree still belongs to. Both the storage figure and the orphan
+     * checks read this rather than a stored total.
+     */
+    async function walk(parts) {
+        const out = [];
+        let start;
+        try {
+            start = await dir(parts || [], false);
+        } catch (err) {
+            if (err && err.name === 'NotFoundError') return out;
+            throw err;
+        }
+        const stack = [[parts || [], start]];
+        while (stack.length) {
+            const [prefix, handle] = stack.pop();
+            for await (const [name, entry] of handle.entries()) {
+                const here = prefix.concat([name]);
+                if (entry.kind === 'directory') {
+                    stack.push([here, entry]);
+                } else {
+                    out.push({ path: here, size: (await entry.getFile()).size });
+                }
+            }
+        }
+        return out;
+    }
+
     async function usage() {
         const est = await navigator.storage.estimate();
         return { usage: est.usage || 0, quota: est.quota || 0 };
     }
 
-    g.PS_OPFS = { dir, fileHandle, file, exists, writeBlob, writeStream, removeDir, usage };
+    g.PS_OPFS = { dir, fileHandle, file, exists, writeBlob, writeStream, removeDir, walk, usage };
 })(self);

@@ -1041,6 +1041,53 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         orphans.after.nextUp === 0 && orphans.after.seasons === 0,
         `${orphans.after.nextUp} next up, ${orphans.after.seasons} seasons`);
 
+    // Every byte an item wrote comes back when it stops being held.
+    //
+    // Walked rather than asserted against the remove calls: the tree has three
+    // lifetimes in it — media keyed by source, an item's row and artwork keyed
+    // by item, and a series' or season's artwork, which has no download row at
+    // all and lives only as long as a descendant does — and a grep over the
+    // writes cannot tell which tree a path still belongs to.
+    const reclaim = await page.evaluate(async (pid, seriesId) => {
+        const { knownServers, SourceServer } = await import('/web/plugin/source.js');
+        const { downloadSeries, removeDownload, listDownloads } = await import('/web/plugin/downloader.js');
+        const server = new SourceServer(knownServers(pid)[0]);
+        const dto = await server.item(seriesId);
+
+        const paths = async () => (await window.PS_OPFS.walk([])).map((f) => f.path.join('/')).sort();
+        const before = await paths();
+        await downloadSeries(server, dto, {});
+        const written = (await paths()).filter((p) => !before.includes(p));
+
+        const items = await window.PS_DB.all('items');
+        const mine = new Set(items
+            .filter((r) => r.dto.Type === 'Episode' && r.dto.SeriesId === seriesId)
+            .map((r) => r.id));
+        for (const row of (await listDownloads()).filter((r) => mine.has(r.itemId))) {
+            await removeDownload(row);
+        }
+        const left = (await paths()).filter((p) => !before.includes(p));
+        const rows = await window.PS_DB.all('items');
+        return {
+            written: written.length,
+            left,
+            seriesRow: rows.some((r) => r.id === seriesId),
+            seasonRows: rows.filter((r) => r.dto.Type === 'Season' && r.dto.SeriesId === seriesId).length
+        };
+    }, phantomId, PARENT_SERIES);
+
+    check('removing every episode of a series leaves no bytes behind',
+        reclaim.written > 0 && reclaim.left.length === 0,
+        `wrote ${reclaim.written} files, ${reclaim.left.length} left: `
+        + JSON.stringify(reclaim.left.slice(0, 6)));
+    // The rows are meant to stay. library.js hides a parent with no held
+    // children at read time, deliberately, so that it is right however the
+    // children went away; pruning them here as well would put one decision in
+    // two places. Only the bytes are reclaimed.
+    check('a parent row outlives its children on purpose',
+        reclaim.seriesRow && reclaim.seasonRows > 0,
+        `series row ${reclaim.seriesRow}, ${reclaim.seasonRows} season rows`);
+
     // Track numbering is per file; a series-wide choice has to be resolved per file.
     const matching = await page.evaluate(async () => {
         const { matchTrack } = await import('/web/plugin/downloader.js');

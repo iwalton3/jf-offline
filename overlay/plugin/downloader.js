@@ -725,10 +725,11 @@ export async function downloadItem(server, reactiveDto, options = {}) {
             // have run before the abort surfaced — putImages is a handful of
             // fetches. The library is derived from item rows, not from download
             // rows, so a row left here lists a cancelled item as playable and
-            // nothing ever removes it. Undo exactly what this call wrote; play
-            // history is not ours to delete, so userdata stays.
-            await OPFS().removeDir(S().paths.imageDir(server.id, dto.Id));
-            await DB().del('items', [server.id, dto.Id]);
+            // nothing ever removes it. Through the sweep rather than by hand:
+            // cancelling one source of an item another source still holds must
+            // not take the shared row and artwork with it. Play history is not
+            // ours to delete, so userdata stays.
+            await reclaimUnreachable(server.id);
             const cancelError = new Error('cancelled');
             cancelError.cancelled = true;
             throw cancelError;
@@ -1087,18 +1088,63 @@ export async function inspectSeries(server, reactiveDto) {
     };
 }
 
+/**
+ * Drop everything on this server that nothing held can still reach.
+ *
+ * Three lifetimes end in this one place rather than at each call site that
+ * removes something, because they are not the same lifetime and every site that
+ * guessed got a different subset wrong:
+ *
+ *   - media and its download row are keyed by media source;
+ *   - an item's row and its artwork are keyed by item, so they outlive any one
+ *     source and must not go while another source of the same item is held;
+ *   - a series' or a season's artwork belongs to NO download row and lives
+ *     exactly as long as a held episode names it.
+ *
+ * Reachability is recomputed rather than decremented, for the reason library.js
+ * derives parents at read time: it is then right however a row went away — a
+ * failed download, a cancel, a season filter that took nothing — and not only on
+ * the path somebody remembered to clean up. Parent ROWS are deliberately left:
+ * `loadAll` hides a parent with no held children, and pruning them here would
+ * put the same decision in two places.
+ *
+ * Returns the item ids whose last copy is now gone, so a caller can decide what
+ * else belonged to them.
+ */
+async function reclaimUnreachable(srv) {
+    const [downloads, items] = await Promise.all([DB().all('downloads'), DB().all('items')]);
+    const held = new Set(downloads.filter((r) => r.srv === srv).map((r) => r.itemId));
+    const mine = items.filter((r) => r.srv === srv);
+
+    const reachable = new Set();
+    for (const row of mine) {
+        if (row.dto.Type !== 'Episode' || !held.has(row.id)) continue;
+        if (row.dto.SeasonId) reachable.add(row.dto.SeasonId);
+        if (row.dto.SeriesId) reachable.add(row.dto.SeriesId);
+    }
+
+    const dropped = new Set();
+    for (const row of mine) {
+        const isParent = row.dto.Type === 'Series' || row.dto.Type === 'Season';
+        if (isParent ? reachable.has(row.id) : held.has(row.id)) continue;
+        await OPFS().removeDir(S().paths.imageDir(srv, row.id));
+        if (isParent) continue;
+        await DB().del('items', [srv, row.id]);
+        dropped.add(row.id);
+    }
+    return dropped;
+}
+
 export async function removeDownload(reactiveRow) {
     const row = plain(reactiveRow);
     await OPFS().removeDir(S().paths.mediaDir(row.srv, row.itemId, row.sourceId));
-    // Images live in their own tree, keyed by item rather than by media source,
-    // so removing the media directory left them behind — several hundred KB per
-    // item that nothing would ever delete and that heldBytes() cannot see,
-    // because it sums download rows. The settings page's storage figure is only
-    // honest if removing everything in the list actually empties the disk.
-    await OPFS().removeDir(S().paths.imageDir(row.srv, row.itemId));
     await DB().del('downloads', [row.srv, row.itemId, row.sourceId]);
-    await DB().del('items', [row.srv, row.itemId]);
-    await DB().del('userdata', [row.srv, row.itemId]);
+    const dropped = await reclaimUnreachable(row.srv);
+    // Only when the last copy of the item went. Removing one of two sources is
+    // not a decision to forget that it was watched, and a deliberate removal is
+    // — which is why this is here and not inside the sweep, where the cancel
+    // path would inherit it.
+    if (dropped.has(row.itemId)) await DB().del('userdata', [row.srv, row.itemId]);
 }
 
 export async function listDownloads() {
