@@ -893,6 +893,21 @@ class OfflineSyncManager extends Component {
         return (window.PS_SCHEMA.QUALITIES || []).map((q) => ({ label: q.label, value: q.id }));
     }
 
+    /**
+     * Will the server rebuild the picture for this download as it is now asked?
+     *
+     * Not a fixed property of the file: an item whose video would be copied
+     * becomes an encode the moment a subtitle is chosen to burn in, because
+     * burning is a picture operation. Read live rather than captured, so the
+     * warning and the quality control appear the moment the choice creates the
+     * work — otherwise a burn quietly applied the hidden default cap.
+     */
+    willEncode() {
+        const choice = this.state.askChoice;
+        const burning = choice !== 'auto' && choice !== 'none';
+        return this.state.askTranscode || (this.state.askRemux && burning);
+    }
+
     onAskSeasonChange(ev) {
         this.state.askSeasonId = ev.detail ? String(ev.detail.value) : ev.target.value;
     }
@@ -1236,13 +1251,17 @@ class OfflineSyncManager extends Component {
                         <h3>Before downloading ${s.asking.Name}</h3>
                         ${when(!!s.askSummary, () => html`<p class="note">${s.askSummary}</p>`)}
 
-                        ${when(s.askTranscode, () => html`
+                        ${when(this.willEncode(), () => html`
                             <div class="warn">
                                 <strong>This needs your server to re-encode the video.</strong>
-                                The picture is ${s.askVideo || 'in a codec'} that this browser
-                                cannot play, so the server has to rebuild it — for every episode,
-                                one after another. That is real work on the machine hosting your
-                                library, and it may be slow or heavy for whoever else is using it.
+                                ${s.askTranscode
+                                    ? html`The picture is ${s.askVideo || 'in a codec'} that this
+                                        browser cannot play, so the server has to rebuild it`
+                                    : html`Burning a subtitle in draws it into the picture, so the
+                                        server has to rebuild the video to do it`}
+                                — for every episode, one after another. That is real work on the
+                                machine hosting your library, and it may be slow or heavy for
+                                whoever else is using it.
                             </div>
                             <div class="field">
                                 <label for="osx-quality">Transcode quality</label>
@@ -1253,7 +1272,7 @@ class OfflineSyncManager extends Component {
                             </div>
                         `)}
 
-                        ${when(s.askRemux && !s.askTranscode, () => html`
+                        ${when(s.askRemux && !this.willEncode(), () => html`
                             <div class="note">
                                 The video is ${s.askVideo || 'already playable'} but sits in
                                 ${s.askContainer ? 'a ' + s.askContainer : 'a container'} this

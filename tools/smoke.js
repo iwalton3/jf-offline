@@ -1499,6 +1499,45 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
             && leak.second.seasons < leak.bigSeasons,
         leak.error || `${leak.second.seasons} seasons vs the previous ${leak.bigSeasons}, grid ${leak.second.gridRows}`);
 
+    // A copy becomes an encode the moment a subtitle is chosen to burn in, and the
+    // dialog has to follow that. Otherwise the remux note keeps saying nothing is
+    // lost while the hidden default quality cap is applied to a rebuilt picture.
+    const burnFlipsPlan = await page.evaluate(async (itemId) => {
+        const el = document.querySelector('offline-sync-manager');
+        if (!el) return { error: 'settings page did not mount' };
+        const { knownServers, SourceServer } = await import('/web/plugin/source.js');
+        const source = knownServers(window.PS_SCHEMA.ID.SERVER)[0];
+        const server = new SourceServer(source);
+        const item = await server.item(itemId);
+
+        el.state.servers = knownServers(window.PS_SCHEMA.ID.SERVER);
+        el.state.serverId = source.id;
+        el.start(item);
+
+        const deadline = Date.now() + 60000;
+        while (Date.now() < deadline && !el.state.asking && !el.state.error) {
+            await new Promise((r) => setTimeout(r, 200));
+        }
+        if (!el.state.asking) return { error: el.state.error || 'never asked' };
+
+        const picture = el.state.askTracks.find((t) => !t.canExtract);
+        const before = { remux: el.state.askRemux, encode: el.willEncode() };
+        el.state.askChoice = picture ? String(picture.index) : 'auto';
+        const after = { encode: el.willEncode(), pictureTrack: !!picture };
+        el.resetAsk();
+        el.state.asking = null;
+        return { before, after };
+    }, BURN_ITEM);
+
+    check('an h264 file with a picture track starts out as a copy',
+        !burnFlipsPlan.error && burnFlipsPlan.before.remux === true
+        && burnFlipsPlan.before.encode === false,
+        burnFlipsPlan.error || JSON.stringify(burnFlipsPlan.before));
+    check('choosing to burn one in turns it into an encode, and says so',
+        !burnFlipsPlan.error && burnFlipsPlan.after.pictureTrack === true
+        && burnFlipsPlan.after.encode === true,
+        burnFlipsPlan.error || JSON.stringify(burnFlipsPlan.after));
+
     // An item with nothing to ask about must still download. This is the path
     // that silently did nothing: start() held the exclusive lock, so the run()
     // it called at the end was refused and the download never began.
