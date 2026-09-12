@@ -188,6 +188,40 @@ HEADFUL=1 ... node tools/smoke.js   # to watch it
   load so the check happens promptly, which is the difference between "next
   start" and "eventually", and surfaces a waiting update so the page can say so.
 
+- **The precache pointer may only move to a cache that holds everything.** The
+  fetch loop deliberately swallows a failure so one unreachable file does not
+  abandon the other 2399 — which means the loop finishing says nothing about what
+  landed. It used to swap on the loop finishing and then delete every older
+  cache, so a partial run left a partial cache as the ONLY cache, and the
+  overlay's own scripts are exactly the files never carried over. The swap is now
+  gated on re-checking every pending URL. **Not covered by a test**: the worker's
+  own fetches do not pass through puppeteer's interception, and going offline
+  fails the manifest fetch before the swap is reached.
+- **A memoised promise must forget its rejection.** `if (!cached) cached =
+  somethingAsync()` cached one transient failure for the life of the page or the
+  worker. Three places had it — the IndexedDB handle, a server's permission
+  policy, and the manager module the modal imports — so `PS_SCHEMA.once()` is the
+  one definition. A rejected `open()` made the worker answer every navigation
+  with a network error until the tab was closed.
+- **`playedSetBy` may only be written when `played` is.** It describes how the
+  played flag got its value, so rewriting it on an unrelated write destroys it: a
+  progress report after a deliberate mark relabelled the mark, and favouriting an
+  item relabelled a playback-derived flag as deliberate.
+- **A cl-virtual-list key must name everything its row draws from.** The list
+  memoises with `trustKey`, so a cached row for a key is reused WITHOUT calling
+  the render function. `itemKey()` and `nodeKey()` exist to make that one rule
+  checkable; the older wording — "a row may read nothing but its own item" — was
+  the same rule stated so that nothing could verify it, and the row broke it while
+  the comment claimed otherwise.
+- **A cancelled download must never be recorded COMPLETE**, and the guard belongs
+  at the one place COMPLETE is written. Subtitles, font attachments, trickplay
+  tiles and images all run after the media transfer, none of them observed a
+  cancel, and each swallows its own errors — so an abort passed through them
+  unnoticed and the item appeared in the list as if nothing had happened.
+- **A stored DTO describes what is held, not what the source has.** Counts,
+  and `Trickplay` — which arrives listing every width the server generated while
+  the downloader keeps one. Advertising the rest lets jellyfin-web ask for tiles
+  that were never stored.
 - **PlaybackInfo cannot tell you whether a download is a remux or a re-encode,
   and both its answers say "transcode".** `SupportsDirectStream` is false for
   every container the device profile does not list, and `TranscodeReasons` is

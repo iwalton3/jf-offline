@@ -1259,6 +1259,70 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     check('the live cache holds the document a navigation asks for',
         caches_.hasIndex === true, JSON.stringify(caches_.counts));
 
+    // A memoised promise that keeps its rejection turns one blip into a permanent
+    // fault: the IndexedDB handle, a server's permission policy and the manager
+    // module the modal imports all had this shape, and none of them could recover
+    // without a reload.
+    const memo = await page.evaluate(async () => {
+        let calls = 0;
+        const flaky = window.PS_SCHEMA.once(async () => {
+            calls++;
+            if (calls === 1) throw new Error('first call fails');
+            return 'ok';
+        });
+        let firstError = null;
+        try { await flaky(); } catch (err) { firstError = err.message; }
+        const second = await flaky();
+        const third = await flaky();
+        return { firstError, second, third, calls };
+    });
+
+    check('a memoised call forgets a failure and retries',
+        memo.firstError === 'first call fails' && memo.second === 'ok', JSON.stringify(memo));
+    check('and then caches the success rather than repeating it',
+        memo.third === 'ok' && memo.calls === 2, `${memo.calls} calls`);
+
+    // ---- 6f. what removal actually removes --------------------------------
+    //
+    // Images hang off the item and the media off the media source, so removing
+    // the media directory left the artwork behind — bytes nothing would ever
+    // delete and that the settings page's own storage figure cannot see, because
+    // it sums download rows.
+    const removalSweep = await page.evaluate(async (pid, itemId) => {
+        const { knownServers, SourceServer } = await import('/web/plugin/source.js');
+        const { downloadItem, removeDownload, listDownloads } = await import('/web/plugin/downloader.js');
+        const source = knownServers(pid)[0];
+        if (!source) return { error: 'not signed in to the source server' };
+        const server = new SourceServer(source);
+
+        for (const old of (await listDownloads()).filter((r) => r.itemId === itemId)) {
+            await removeDownload(old);
+        }
+        const row = await downloadItem(server, await server.item(itemId), {});
+        const path = window.PS_SCHEMA.paths.image(row.srv, row.itemId, 'Primary');
+        const before = !!(await window.PS_OPFS.file(path));
+        await removeDownload(row);
+        const after = !!(await window.PS_OPFS.file(path));
+        const media = !!(await window.PS_OPFS.file(
+            window.PS_SCHEMA.paths.original(row.srv, row.itemId, row.sourceId, row.container)));
+
+        // Put it back. This is the item the play-state checks below read from,
+        // and removing a download takes its userdata row with it — so leaving it
+        // gone makes later checks fail for a reason that has nothing to do with
+        // what they test.
+        await downloadItem(server, await server.item(itemId), {});
+        return { before, after, media };
+    }, phantomId, DIRECT_ITEM);
+
+    // Stated as its own check because the removal check below is vacuous if the
+    // image was never written in the first place.
+    check('a download stores the item artwork',
+        !removalSweep.error && removalSweep.before === true,
+        removalSweep.error || (removalSweep.before ? 'written' : 'nothing was written'));
+    check('removing a download takes its artwork with it',
+        !removalSweep.error && removalSweep.after === false && removalSweep.media === false,
+        removalSweep.error || `image left ${removalSweep.after}, media left ${removalSweep.media}`);
+
     // ---- 7. play state ----------------------------------------------------
 
     const playstate = await page.evaluate(async (itemId) => {
@@ -1283,6 +1347,41 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     }, direct.id);
     check('progress is recorded', playstate.advanced === playstate.target, `${playstate.advanced} (wanted ${playstate.target})`);
     check('progress is advance-only', playstate.afterRewind === playstate.target, `rewind to ${playstate.start} left it at ${playstate.afterRewind}`);
+    // playedSetBy says HOW the played flag got its value, and schema.js records
+    // that it cannot be recovered once written. It was rewritten on every write,
+    // so a progress report arriving after a deliberate mark relabelled the mark,
+    // and favouriting an item relabelled a playback-derived flag as deliberate.
+    const setBy = await page.evaluate(async (itemId) => {
+        const post = (path, body) => fetch(path, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+        });
+        const row = async () => {
+            const all = await window.PS_DB.all('userdata');
+            return all.find((u) => u.itemId === itemId) || {};
+        };
+        await fetch('/UserPlayedItems/' + itemId, { method: 'POST' });
+        const afterMark = (await row()).playedSetBy;
+
+        const at = ((await row()).positionTicks || 0) + 5000000;
+        await post('/Sessions/Playing/Progress', { ItemId: itemId, PositionTicks: at });
+        const afterProgress = (await row()).playedSetBy;
+
+        const fav = await fetch('/UserFavoriteItems/' + itemId, { method: 'POST' });
+        const afterFavourite = (await row()).playedSetBy;
+        if (!fav.ok) return { error: 'favourite route answered ' + fav.status };
+
+        return { afterMark, afterProgress, afterFavourite };
+    }, direct.id);
+
+    check('a deliberate mark is recorded as one',
+        !setBy.error && setBy.afterMark === 'explicit', setBy.error || String(setBy.afterMark));
+    check('a later progress report does not relabel that mark',
+        !setBy.error && setBy.afterProgress === 'explicit',
+        setBy.error || `became ${setBy.afterProgress}`);
+    check('and neither does an unrelated write',
+        !setBy.error && setBy.afterFavourite === 'explicit',
+        setBy.error || `became ${setBy.afterFavourite}`);
+
     check('an explicit mark is verbatim in both directions',
         playstate.marked === true && playstate.unmarked === false,
         `${playstate.marked} then ${playstate.unmarked}`);
@@ -1388,6 +1487,44 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
             filmsAtTop: nodes.filter((n) => n.kind === 'item' && n.depth === 0).length
         };
     });
+
+    // cl-virtual-list memoises with trustKey, so a cached row for a key is reused
+    // without calling the render function again. Anything a row draws from that
+    // is not in its key is therefore frozen at whatever it was first drawn with.
+    const keys = await page.evaluate(async () => {
+        const el = document.querySelector('offline-sync-manager');
+        if (!el) return { error: 'settings page did not mount' };
+        const item = (el.state.items || [])[0];
+        if (!item) return { error: 'no items loaded' };
+
+        const wasHeld = el.state.held.includes(item.Id);
+        const before = el.itemKey(item);
+        el.state.held = wasHeld
+            ? el.state.held.filter((id) => id !== item.Id)
+            : el.state.held.concat([item.Id]);
+        const after = el.itemKey(item);
+        el.state.held = wasHeld
+            ? el.state.held.concat([item.Id])
+            : el.state.held.filter((id) => id !== item.Id);
+
+        const group = el.downloadTree().find((n) => n.kind === 'series' || n.kind === 'season');
+        const groupKeys = group
+            ? {
+                shut: el.nodeKey(Object.assign({}, group, { open: false })),
+                open: el.nodeKey(Object.assign({}, group, { open: true })),
+                grown: el.nodeKey(Object.assign({}, group, { count: group.count + 1 }))
+            }
+            : null;
+        return { before, after, groupKeys };
+    });
+
+    check('a row\'s key changes when its held state does',
+        !keys.error && keys.before !== keys.after,
+        keys.error || `${keys.before} vs ${keys.after}`);
+    check('a group\'s key changes when it opens or grows',
+        !keys.error && (!keys.groupKeys || (keys.groupKeys.shut !== keys.groupKeys.open
+            && keys.groupKeys.shut !== keys.groupKeys.grown)),
+        keys.error || JSON.stringify(keys.groupKeys));
 
     check('films are listed with no group to delete them all at once',
         !tree.error && tree.groups === 0 && tree.filmsAtTop > 0,
@@ -1747,6 +1884,40 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     }, direct.id);
     check('the shimmed socket opens and stays open', socket.opened === true && socket.state === 1);
     check('play state is pushed over the shimmed socket', socket.message === 'UserDataChanged', String(socket.message));
+
+    // An episode finishing has to refresh the series card, because a Series card
+    // is what the home screen, Next Up and search actually draw. Every episode
+    // DTO carries a SeasonId, so picking the first parent found always picked the
+    // season and the series was never told.
+    const parents = await page.evaluate(async () => {
+        // Whichever episode the suite happens to be holding by now, rather than a
+        // fixture id that may have been removed by an earlier check.
+        const held = await (await fetch('/Items?Recursive=true&IncludeItemTypes=Episode')).json();
+        const episodeId = (held.Items || []).length ? held.Items[0].Id : null;
+        if (!episodeId) return { skipped: true };
+
+        const ws = new WebSocket(location.origin.replace('http', 'ws') + '/socket?ApiKey=x');
+        await new Promise((res) => { ws.onopen = () => res(); setTimeout(res, 2000); });
+        const got = new Promise((res) => {
+            ws.onmessage = (e) => {
+                const msg = JSON.parse(e.data);
+                if (msg.MessageType === 'UserDataChanged') res(msg.Data.UserDataList.map((u) => u.ItemId));
+            };
+            setTimeout(() => res(null), 5000);
+        });
+        await fetch('/UserPlayedItems/' + episodeId, { method: 'POST' });
+        const ids = await got;
+        const dto = await (await fetch('/Items/' + episodeId)).json();
+        return { ids, seasonId: dto.SeasonId, seriesId: dto.SeriesId };
+    });
+
+    check('finishing an episode tells the season AND the series',
+        parents.skipped || (!!parents.ids && !!parents.seriesId
+            && parents.ids.includes(parents.seasonId) && parents.ids.includes(parents.seriesId)),
+        parents.skipped ? 'no episodes held'
+            : (parents.ids
+                ? `pushed ${parents.ids.length}, series ${parents.ids.includes(parents.seriesId)}`
+                : 'no message arrived'));
 
     // ---- 10. offline ------------------------------------------------------
 

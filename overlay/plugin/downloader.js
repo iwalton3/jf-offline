@@ -298,12 +298,16 @@ export function matchTrack(tracks, want) {
     return null;
 }
 
-async function downloadSubtitles(server, dto, mediaSource, tracks) {
+async function downloadSubtitles(server, dto, mediaSource, tracks, signal) {
     const held = [];
     for (const track of tracks) {
+        // Outside the try: the catch below swallows a failure so one bad track
+        // does not lose the rest, and it would swallow an abort just as happily.
+        if (signal && signal.aborted) throw new DOMException('cancelled', 'AbortError');
         const format = subtitleFormat(track.codec);
         try {
-            const res = await server.fetch(server.subtitleUrl(dto.Id, mediaSource.Id, track.index, format));
+            const res = await server.fetchSignal(
+                server.subtitleUrl(dto.Id, mediaSource.Id, track.index, format), signal);
             const body = await res.text();
             if (!body.trim()) continue;
             await OPFS().writeBlob(
@@ -344,14 +348,16 @@ const FONT_MIME_TYPES = [
  * obvious on typeset anime and invisible on plain dialogue — so it is worth
  * fetching files that can run to tens of megabytes.
  */
-async function downloadAttachments(server, dto, mediaSource) {
+async function downloadAttachments(server, dto, mediaSource, signal) {
     const wanted = (mediaSource.MediaAttachments || [])
         .filter((att) => FONT_MIME_TYPES.includes(att.MimeType));
 
     const held = [];
     for (const att of wanted) {
+        if (signal && signal.aborted) throw new DOMException('cancelled', 'AbortError');
         try {
-            const res = await server.fetch(server.attachmentUrl(dto.Id, mediaSource.Id, att.Index));
+            const res = await server.fetchSignal(
+                server.attachmentUrl(dto.Id, mediaSource.Id, att.Index), signal);
             await OPFS().writeBlob(
                 S().paths.attachment(server.id, dto.Id, mediaSource.Id, att.Index),
                 await res.blob()
@@ -375,7 +381,7 @@ async function downloadAttachments(server, dto, mediaSource) {
  * Unverified against a server that actually has them: the QA library has none.
  * Written to fail quietly for that reason rather than to be trusted.
  */
-async function downloadTrickplay(server, dto, mediaSource) {
+async function downloadTrickplay(server, dto, mediaSource, signal) {
     const byWidth = (dto.Trickplay || {})[mediaSource.Id];
     if (!byWidth) return null;
 
@@ -389,8 +395,9 @@ async function downloadTrickplay(server, dto, mediaSource) {
     const tiles = Math.ceil(info.ThumbnailCount / perTile);
     let stored = 0;
     for (let i = 0; i < tiles; i++) {
+        if (signal && signal.aborted) throw new DOMException('cancelled', 'AbortError');
         try {
-            const res = await server.fetch(server.trickplayTileUrl(dto.Id, width, i));
+            const res = await server.fetchSignal(server.trickplayTileUrl(dto.Id, width, i), signal);
             await OPFS().writeBlob(
                 S().paths.trickplayTile(server.id, dto.Id, mediaSource.Id, width, i),
                 await res.blob()
@@ -656,15 +663,41 @@ export async function downloadItem(server, reactiveDto, options = {}) {
         // the text tracks instead: something readable beats nothing at all.
         const held = burning || subtitle.mode === S().SUBTITLE_MODE.NONE
             ? []
-            : await downloadSubtitles(server, dto, mediaSource, tracks.filter((t) => t.canExtract));
+            : await downloadSubtitles(
+                server, dto, mediaSource, tracks.filter((t) => t.canExtract), controller.signal);
 
         // Fonts go with the subtitles that need them, so they are skipped for the
         // same reasons: a burned-in track is already typeset into the picture.
-        const attachments = held.length ? await downloadAttachments(server, dto, mediaSource) : [];
-        const trickplay = await downloadTrickplay(server, dto, mediaSource);
+        const attachments = held.length
+            ? await downloadAttachments(server, dto, mediaSource, controller.signal)
+            : [];
+        const trickplay = await downloadTrickplay(server, dto, mediaSource, controller.signal);
+
+        // The stored DTO must describe what is held, not what the source has. It
+        // arrives listing every trickplay width the server generated and the
+        // downloader keeps exactly one, so advertising the rest lets jellyfin-web
+        // ask for tiles that were never stored — every one a 404, with scrubbing
+        // thumbnails simply absent and nothing anywhere to say why.
+        if (dto.Trickplay) {
+            const held = trickplay && ((dto.Trickplay[mediaSource.Id] || {})[trickplay.width]);
+            dto.Trickplay = held
+                ? { [mediaSource.Id]: { [trickplay.width]: held } }
+                : undefined;
+        }
 
         await putItem(server, dto);
         await putImages(server, dto);
+
+        // Re-checked here because the window between the media transfer and this
+        // line is not brief — subtitles, font attachments and trickplay tiles all
+        // run in it, and so do the item's images. Nothing in that window used to
+        // observe a cancel, so pressing Cancel there ended with the item recorded
+        // COMPLETE and neither the files nor the row cleaned up. This is the one
+        // place COMPLETE is written, so it is the one place the invariant needs
+        // stating: a cancelled download is never recorded as held.
+        if ((inFlight.get(key) || {}).cancelled) {
+            throw new DOMException('cancelled', 'AbortError');
+        }
 
         row = await setRow(row, {
             state: S().DOWNLOAD_STATE.COMPLETE,
@@ -746,6 +779,13 @@ export async function inspectSubtitles(server, reactiveDto) {
  * offline browsing has nobody to ask what an episode belongs to.
  */
 export async function downloadSeries(server, reactiveSeriesDto, options = {}) {
+    // Cleared before the first await in this function, and it has to stay there.
+    // Fetching seasons, episodes and every season's images takes seconds on a
+    // large show, the Cancel button is live throughout, and a cancel landing in
+    // that window used to set the flag only for a later line to clear it — so the
+    // series the user had just cancelled downloaded in full.
+    seriesCancelled = false;
+
     const seriesDto = plain(reactiveSeriesDto);
     await assertAllowed(server);
     const onProgress = options.onProgress || (() => {});
@@ -770,7 +810,6 @@ export async function downloadSeries(server, reactiveSeriesDto, options = {}) {
     if (options.seasonId) list = list.filter((ep) => ep.SeasonId === options.seasonId);
     if (options.unwatchedOnly) list = list.filter((ep) => !(ep.UserData && ep.UserData.Played));
 
-    seriesCancelled = false;
     const failures = [];
     const notes = [];
     let taken = 0;
@@ -1039,6 +1078,12 @@ export async function inspectSeries(server, reactiveDto) {
 export async function removeDownload(reactiveRow) {
     const row = plain(reactiveRow);
     await OPFS().removeDir(S().paths.mediaDir(row.srv, row.itemId, row.sourceId));
+    // Images live in their own tree, keyed by item rather than by media source,
+    // so removing the media directory left them behind — several hundred KB per
+    // item that nothing would ever delete and that heldBytes() cannot see,
+    // because it sums download rows. The settings page's storage figure is only
+    // honest if removing everything in the list actually empties the disk.
+    await OPFS().removeDir(S().paths.imageDir(row.srv, row.itemId));
     await DB().del('downloads', [row.srv, row.itemId, row.sourceId]);
     await DB().del('items', [row.srv, row.itemId]);
     await DB().del('userdata', [row.srv, row.itemId]);

@@ -6,34 +6,32 @@
     'use strict';
 
     const S = g.PS_SCHEMA;
-    let opening = null;
 
-    function open() {
-        if (opening) return opening;
-        opening = new Promise((resolve, reject) => {
-            const req = indexedDB.open(S.DB.NAME, S.DB.VERSION);
-            req.onupgradeneeded = (ev) => {
-                const db = req.result;
-                // Additive only: a database this build touches must still open in the
-                // build before it. Never drop or rewrite a store here.
-                for (const [name, def] of Object.entries(S.DB.STORES)) {
-                    const store = db.objectStoreNames.contains(name)
-                        ? ev.target.transaction.objectStore(name)
-                        : db.createObjectStore(name, {
-                            keyPath: def.keyPath,
-                            autoIncrement: !!def.autoIncrement
-                        });
-                    for (const [iname, idef] of Object.entries(def.indexes || {})) {
-                        if (!store.indexNames.contains(iname)) store.createIndex(iname, idef.keyPath);
-                    }
+    // Memoised, but a failure is forgotten rather than cached. A denied storage
+    // permission or a blocked upgrade used to poison every later call for the
+    // lifetime of the worker, and the worker answers navigations from this.
+    const open = S.once(() => new Promise((resolve, reject) => {
+        const req = indexedDB.open(S.DB.NAME, S.DB.VERSION);
+        req.onupgradeneeded = (ev) => {
+            const db = req.result;
+            // Additive only: a database this build touches must still open in the
+            // build before it. Never drop or rewrite a store here.
+            for (const [name, def] of Object.entries(S.DB.STORES)) {
+                const store = db.objectStoreNames.contains(name)
+                    ? ev.target.transaction.objectStore(name)
+                    : db.createObjectStore(name, {
+                        keyPath: def.keyPath,
+                        autoIncrement: !!def.autoIncrement
+                    });
+                for (const [iname, idef] of Object.entries(def.indexes || {})) {
+                    if (!store.indexNames.contains(iname)) store.createIndex(iname, idef.keyPath);
                 }
-            };
-            req.onsuccess = () => resolve(req.result);
-            req.onerror = () => reject(req.error);
-            req.onblocked = () => reject(new Error('phantom db upgrade blocked by another tab'));
-        });
-        return opening;
-    }
+            }
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+        req.onblocked = () => reject(new Error('phantom db upgrade blocked by another tab'));
+    }));
 
     const wrap = (req) => new Promise((resolve, reject) => {
         req.onsuccess = () => resolve(req.result);

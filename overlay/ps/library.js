@@ -120,6 +120,10 @@
      */
     function rankSearch(dtos, term) {
         const needle = term.toLowerCase();
+        // Hoisted: nothing in it depends on the item. Built once per search
+        // instead of once per item, and both the hints and the results call this
+        // on every keystroke over the whole held library.
+        const atWordStart = new RegExp('\\b' + needle.replace(/[.*+?^$()[\]{}|\\]/g, '\\$&'));
         const scored = [];
         for (const dto of dtos) {
             const name = (dto.Name || '').toLowerCase();
@@ -127,7 +131,7 @@
             let score;
             if (name === needle) score = 0;
             else if (name.startsWith(needle)) score = 1;
-            else if (new RegExp('\\b' + needle.replace(/[.*+?^$()[\]{}|\\]/g, '\\$&')).test(name)) score = 2;
+            else if (atWordStart.test(name)) score = 2;
             else if (name.includes(needle)) score = 3;
             else if (series.includes(needle)) score = 4;
             else continue;
@@ -430,8 +434,12 @@
     }
 
     async function image(ctx, id, type) {
-        const { rows } = await loadAll();
-        const row = rows.find((r) => r.id === id);
+        // Indexed, not loadAll(). A browse grid asks for a hundred posters at
+        // once and each one used to rebuild the whole presented library — two
+        // full table scans, a user-data map and a held-count pass — to read one
+        // field. loadAll() is for producing a library; this needs a row.
+        const rows = await DB.allByIndex('items', 'by_id', id);
+        const row = rows[0];
         if (!row) return notFound('item ' + id);
         const file = await g.PS_OPFS.file(S.paths.image(row.srv, id, type));
         if (!file) return notFound('image');

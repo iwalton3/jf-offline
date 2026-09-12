@@ -15,7 +15,6 @@
     const TAG = 'offline-sync-manager';
 
     let overlay = null;
-    let loading = null;
 
     /**
      * The manager module registers the element as a side effect of loading.
@@ -24,11 +23,14 @@
      * exists inside the service worker, and a page is not controlled by the
      * worker on its first visit — so importing it there failed outright until
      * the second load, which is exactly when somebody tries the new menu entry.
+     *
+     * Memoised through once(), which forgets a failure: an import that fails
+     * while the network is down must not leave the menu entry permanently dead
+     * once it comes back.
      */
-    function loadManager() {
-        if (!loading) loading = import(`${base}/web/plugin/manager.js`);
-        return loading;
-    }
+    const loadManager = (g.PS_SCHEMA && g.PS_SCHEMA.once)
+        ? g.PS_SCHEMA.once(() => import(`${base}/web/plugin/manager.js`))
+        : () => import(`${base}/web/plugin/manager.js`);
 
     /* Deliberately NOT a shadow root, though this is a lone panel in someone
      * else's document and a shadow root is the obvious way to isolate one.

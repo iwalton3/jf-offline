@@ -11,14 +11,19 @@
     const OPFS = g.PS_OPFS;
     const { json, noContent, notFound, text, serveFile, mimeFor } = g.PS_HTTP;
 
+    // Both of these are asked once per HLS segment during playback and once per
+    // poster in a grid, so neither may scan a table. The index is on the item id
+    // because that is all jellyfin-web knows; a second server holding the same id
+    // is possible, which is why these take the first match rather than assuming
+    // uniqueness.
     async function findDownload(itemId) {
-        const rows = await DB.allByIndex('downloads', 'by_state', S.DOWNLOAD_STATE.COMPLETE);
-        return rows.find((r) => r.itemId === itemId) || null;
+        const rows = await DB.allByIndex('downloads', 'by_item_id', itemId);
+        return rows.find((r) => r.state === S.DOWNLOAD_STATE.COMPLETE) || null;
     }
 
     async function findItem(itemId) {
-        const rows = await DB.all('items');
-        return rows.find((r) => r.id === itemId) || null;
+        const rows = await DB.allByIndex('items', 'by_id', itemId);
+        return rows[0] || null;
     }
 
     /**
@@ -267,10 +272,15 @@
             srv, itemId, played: false, positionTicks: 0, playCount: 0,
             lastPlayedDate: null, playedSetBy: null, isFavorite: false
         };
-        const next = Object.assign({}, existing, changes, {
-            playedSetBy: setBy,
-            updatedAt: Date.now()
-        });
+        // Only when `played` is what changed. playedSetBy describes how the
+        // played flag got its value, so rewriting it on an unrelated write
+        // destroys the distinction: a progress report arriving after a deliberate
+        // mark relabelled that mark as playback-derived, and favouriting an item
+        // relabelled a playback-derived one as deliberate. schema.js says this
+        // cannot be recovered once the rows are written, and syncback is what
+        // will read it.
+        const next = Object.assign({}, existing, changes, { updatedAt: Date.now() });
+        if ('played' in changes) next.playedSetBy = setBy;
         await DB.put('userdata', next);
         return next;
     }

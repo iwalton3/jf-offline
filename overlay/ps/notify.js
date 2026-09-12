@@ -40,9 +40,18 @@
                 ? Math.min(100, (ud.positionTicks / dto.RunTimeTicks) * 100)
                 : undefined
         };
+        // Every parent, not the first one found. An episode DTO always carries a
+        // SeasonId, so `SeasonId || SeriesId` never reached the series — and the
+        // cards a person is actually looking at, on the home screen and in Next
+        // Up and in search, are Series cards. Finishing an episode left the show
+        // it belongs to showing its old watched state until a reload.
         const list = [entry];
-        const parentId = dto && (dto.SeasonId || dto.SeriesId || dto.ParentId);
-        if (parentId) list.push(Object.assign({}, entry, { ItemId: parentId, Key: parentId }));
+        const seen = new Set([itemId]);
+        for (const parentId of [dto && dto.SeasonId, dto && dto.SeriesId, dto && dto.ParentId]) {
+            if (!parentId || seen.has(parentId)) continue;
+            seen.add(parentId);
+            list.push(Object.assign({}, entry, { ItemId: parentId, Key: parentId }));
+        }
 
         await broadcast({
             MessageType: 'UserDataChanged',

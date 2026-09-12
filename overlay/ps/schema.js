@@ -26,7 +26,11 @@
 
     const DB = {
         NAME: 'phantom',
-        VERSION: 1,
+        // 2 added by_id on items and by_item_id on downloads. Both are lookups
+        // the worker does on the hot path — once per poster in a grid, once per
+        // HLS segment during playback — and without them each one was a full
+        // scan of every stored item.
+        VERSION: 2,
         // Every store is keyed by an explicit key path so a row can be written from
         // either context without the caller having to remember the key shape.
         STORES: {
@@ -35,6 +39,8 @@
             items: {
                 keyPath: ['srv', 'id'],
                 indexes: {
+                    // Not unique: the same item id can be held from two servers.
+                    by_id: { keyPath: 'id' },
                     by_type: { keyPath: 'type' },
                     by_series: { keyPath: 'seriesId' },
                     by_season: { keyPath: 'seasonId' },
@@ -47,6 +53,9 @@
                 keyPath: ['srv', 'itemId', 'sourceId'],
                 indexes: {
                     by_item: { keyPath: ['srv', 'itemId'] },
+                    // By item alone, for the lookups that arrive from jellyfin-web
+                    // knowing only an item id.
+                    by_item_id: { keyPath: 'itemId' },
                     by_state: { keyPath: 'state' }
                 }
             },
@@ -129,6 +138,31 @@
         return '';
     }
 
+    /**
+     * Memoise an async call, but never memoise its rejection.
+     *
+     * `if (!cached) cached = somethingAsync()` is the obvious shape and it is a
+     * trap: one transient failure is cached for the lifetime of the page or the
+     * worker, and every later caller is handed an error about a network that has
+     * since come back. Three places wanted this — the IndexedDB handle, a source
+     * server's permission policy, and the manager module the modal imports — and
+     * in all three a single blip became a permanent fault with no way back but a
+     * reload. A success is cached; a failure is forgotten so the next caller
+     * tries again.
+     */
+    function once(fn) {
+        let pending = null;
+        return function (...args) {
+            if (!pending) {
+                pending = Promise.resolve().then(() => fn.apply(this, args));
+                // Clears the memo without swallowing the rejection: callers still
+                // see it, because they hold `pending` itself and not this branch.
+                pending.catch(() => { pending = null; });
+            }
+            return pending;
+        };
+    }
+
     const paths = {
         mediaDir: (srv, itemId, sourceId) => ['media', srv, itemId, sourceId],
         original: (srv, itemId, sourceId, container) =>
@@ -150,11 +184,16 @@
             ['media', srv, itemId, sourceId, 'attachments', String(index)],
         trickplayTile: (srv, itemId, sourceId, width, index) =>
             ['media', srv, itemId, sourceId, 'trickplay', String(width), index + '.jpg'],
+        // Images hang off the item, not off a media source: a multi-version item
+        // has one poster. Which is why imageDir exists — removing a download
+        // removes its media directory, and without a directory of its own the
+        // artwork would be stranded in a tree nothing walks.
+        imageDir: (srv, itemId) => ['images', srv, itemId],
         image: (srv, itemId, type) => ['images', srv, itemId, String(type).toLowerCase()]
     };
 
     g.PS_SCHEMA = {
         ID, VIEWS, DB, DOWNLOAD_STATE, DOWNLOAD_MODE, SUBTITLE_MODE, QUALITIES, DEFAULT_QUALITY,
-        SET_BY, TICKS_PER_MS, OPFS_ROOT, paths, basePath: basePath()
+        SET_BY, TICKS_PER_MS, OPFS_ROOT, paths, once, basePath: basePath()
     };
 })(self);

@@ -129,11 +129,16 @@ export class SourceServer {
      * Somebody who is not permitted to download on their own server must not be
      * able to do it through this tool either.
      */
-    async policy() {
-        if (!this._policy) {
-            this._policy = this.json('/Users/Me').then((me) => (me && me.Policy) || {});
+    policy() {
+        // Per instance, and a failure is not remembered. A cached rejection here
+        // failed every later download on this server object — downloadSeries
+        // holds one across a whole run, so one blip at episode 3 failed episodes
+        // 3 to 60 with an error about a network that had already come back.
+        if (!this._policyOnce) {
+            this._policyOnce = window.PS_SCHEMA.once(
+                () => this.json('/Users/Me').then((me) => (me && me.Policy) || {}));
         }
-        return this._policy;
+        return this._policyOnce();
     }
 
     views() {

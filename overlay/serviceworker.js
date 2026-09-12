@@ -263,6 +263,29 @@ if (IS_SERVICE_WORKER) {
             };
             await Promise.all(Array.from({ length: CONCURRENCY }, worker));
 
+            // What actually landed, asked of the cache rather than counted by the
+            // loop. The fetch above deliberately swallows a failure so one
+            // unreachable file does not abandon the other 2399 — which means the
+            // loop finishing says nothing at all about whether the cache is
+            // complete. Re-checked with the same match() that chose `pending`, so
+            // the two cannot disagree about what counts as present.
+            const missing = [];
+            for (const url of pending) {
+                if (!(await fresh.match(url))) missing.push(url);
+            }
+            done = total - missing.length;
+
+            if (missing.length) {
+                // No swap, and nothing deleted. The half-filled cache stays for the
+                // next run to finish — `pending` is derived from it, so a retry
+                // costs only what is missing. Swapping here and then deleting the
+                // older caches would leave a partial cache as the only cache, and
+                // the overlay's own scripts are exactly the files never carried
+                // over, so the app would lose its bootstrap in airplane mode.
+                report();
+                return { done, total, version: manifest.version, missing: missing.length };
+            }
+
             // The swap. Everything above wrote into a cache nobody was reading;
             // this one line is what makes it live, and it happens only once the
             // cache is complete.
@@ -273,7 +296,7 @@ if (IS_SERVICE_WORKER) {
             }
 
             report();
-            return { done, total, version: manifest.version };
+            return { done, total, version: manifest.version, missing: 0 };
         })().finally(() => { precacheRun = null; });
         return precacheRun;
     }

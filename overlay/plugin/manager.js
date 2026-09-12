@@ -471,14 +471,29 @@ class OfflineSyncManager extends Component {
         });
     }
 
-    /** Append the next page. `loadItems()` with no argument starts from the top. */
+    /**
+     * Append the next page. `loadItems()` with no argument starts from the top.
+     *
+     * A request in flight is SUPERSEDED, not a reason to refuse a new one. A
+     * filter typed while the first page was still loading used to be dropped on
+     * the floor, and the unfiltered answer then landed on the list the filter had
+     * just cleared — the whole library on screen under the user's own search
+     * text, with nothing left to issue the request it was asking for. A page
+     * fetch is easily slower than the 250 ms debounce, so this was reachable on
+     * the first interaction with any library.
+     */
     async loadItems(append) {
         const view = this.state.views.find((v) => v.Id === this.state.viewId);
         if (!view) return;
-        if (this.state.loadingItems) return;
+        // Appending is the one case a second request cannot help: it would ask
+        // for the same page twice and concatenate it twice.
+        if (append && this.state.loadingItems) return;
         const startIndex = append ? this.state.items.length : 0;
         if (append && this.state.itemsTotal && startIndex >= this.state.itemsTotal) return;
 
+        // Not in `state`: a render must not depend on it, and vdx would make it
+        // reactive. Same shape as _filterTimer above.
+        const generation = this._itemsGeneration = (this._itemsGeneration || 0) + 1;
         this.state.loadingItems = true;
         await this.task(startIndex ? 'Loading more' : 'Loading items', async () => {
             const res = await this.server().items({
@@ -488,6 +503,9 @@ class OfflineSyncManager extends Component {
                 StartIndex: startIndex,
                 Limit: PAGE
             });
+            // Somebody asked a newer question while this one was in the air. Its
+            // answer is about a library state nobody is looking at any more.
+            if (generation !== this._itemsGeneration) return;
             const page = res.Items || [];
             this.state.items = startIndex ? this.state.items.concat(page) : page;
             // TotalRecordCount is what says there is more; a full page cannot,
@@ -496,7 +514,7 @@ class OfflineSyncManager extends Component {
                 ? res.TotalRecordCount
                 : this.state.items.length;
         });
-        this.state.loadingItems = false;
+        if (generation === this._itemsGeneration) this.state.loadingItems = false;
     }
 
     /**
@@ -818,10 +836,15 @@ class OfflineSyncManager extends Component {
         return list;
     }
 
-    openGrid() {
+    async openGrid() {
         const server = this.server();
+        if (this.state.gridLoading) return;
         this.state.gridLoading = true;
-        this.task('Reading tracks', async () => {
+        // Awaited. Without this the flag was cleared before the first request had
+        // even been issued, so a sweep of sixty episodes ran with gridLoading
+        // false — no loading state anywhere, and a second press started a second
+        // full sweep of the server.
+        await this.task('Reading tracks', async () => {
             const list = await this.episodesInScope();
             const rows = await inspectEpisodeTracks(server, list, (done, total) => {
                 this.state.gridProgress = `${done} of ${total}`;
@@ -1022,14 +1045,38 @@ class OfflineSyncManager extends Component {
     }
 
     /**
+     * The key for a row in the available-items list.
+     *
+     * cl-virtual-list memoises with `trustKey`, which means a cached row for a
+     * given key is reused WITHOUT calling the render function again. So the key
+     * has to name everything the row's appearance depends on, not merely identify
+     * the item: held-ness is read from component state, and with `Id` alone a row
+     * kept its pre-download look until something else rebuilt the whole list.
+     *
+     * The other rule this replaced — "a row may read nothing but its own item" —
+     * was the same rule stated in a way that could not be checked, and the row
+     * below broke it while claiming to follow it. Reading outside the item is
+     * fine; leaving what you read out of the key is not.
+     */
+    itemKey(item) {
+        return item.Id + (this.state.held.includes(item.Id) ? ':held' : '');
+    }
+
+    /** The key for a row in the held tree. Same rule as itemKey. */
+    nodeKey(node) {
+        return node.kind === 'item'
+            ? node.id + ':' + (node.entry.row.state || '') + ':' + (node.entry.row.bytesDone || 0)
+            : node.id + ':' + (node.open ? 'open' : 'shut') + ':' + node.count + ':' + node.bytes;
+    }
+
+    /**
      * A row.
      *
-     * Nothing here may read state outside `item`. The virtual list memoises rows
-     * by key, so a row drawn while something else was busy keeps that appearance
-     * for good — which is what left every button greyed out after a filter, since
-     * filtering set `busy` for the length of the request the rows were drawn by.
-     * Re-entry is refused in `guard` instead, where it is one check rather than
-     * one per row.
+     * Whatever this reads has to appear in itemKey(). Busy is deliberately not
+     * read here and not in the key either: a row drawn while something else was
+     * busy would keep that appearance for good, which is what left every button
+     * greyed out after a filter. Re-entry is refused in `guard` instead, where it
+     * is one check rather than one per row.
      */
     renderItem(item) {
         const held = this.state.held.includes(item.Id);
@@ -1451,7 +1498,7 @@ class OfflineSyncManager extends Component {
                                     itemHeight="${ROW_HEIGHT}"
                                     scrollContainer="parent"
                                     renderItem="${(item) => this.renderItem(item)}"
-                                    keyFn="${(item) => item.Id}"></cl-virtual-list>
+                                    keyFn="${(item) => this.itemKey(item)}"></cl-virtual-list>
                             `)}
                         </div>
                         <div class="statusline" style="margin-top:.5em">
@@ -1481,7 +1528,7 @@ class OfflineSyncManager extends Component {
                                 scrollContainer="parent"
                                 emptyMessage="Nothing matches that."
                                 renderItem="${(node) => this.renderNode(node)}"
-                                keyFn="${(node) => node.id}"></cl-virtual-list>
+                                keyFn="${(node) => this.nodeKey(node)}"></cl-virtual-list>
                         </div>
                     `)}
                 </div>

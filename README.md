@@ -230,6 +230,7 @@ overlay/              the diff against an unmodified build
   diag.html             dev page: does the phantom server work in THIS browser
 tools/
   probe-requests.js     records what jellyfin-web really asks for, against a real server
+  remux-probe.py        measures whether the server copies a stream or re-encodes it
   smoke.js              end-to-end test in a real browser
 ```
 
