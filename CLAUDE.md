@@ -63,6 +63,19 @@ a rebuilt server, set it up as the dashboard would:
   already has tiles at a width, so changing the tile grid alone regenerates
   nothing — adding a width is what makes it re-run.
 
+**A second source server is optional, and six checks skip loudly without it.**
+They cover holding two servers at once, which is what the `[srv, id]` keys exist
+for. One container is enough:
+
+```sh
+stdjflib container --port 8097 --keep-running ~/Desktop/std-jf-lib
+```
+
+Point `JF_BASE2` elsewhere if it is not on 8097. A container whose media mount
+has gone stale — the library was rebuilt under it, so the bind points at an inode
+that no longer holds anything — answers the API normally and 404s every file.
+Restart it; `ls /media` inside it is the check.
+
 `tools/userdata-probe.py` and `tools/remux-probe.py` need no setup beyond the
 server itself.
 
@@ -117,6 +130,17 @@ server itself.
   memoised by key, so a row drawn while the component was busy keeps that
   appearance for good. This is how every download button ended up greyed out
   after a filter.
+- **jellyfin-web tries ONE server, and it is the last one you used.** Saved
+  servers are sorted by `DateLastAccessed` and `connectToServers` takes
+  `servers[0]` and never falls through
+  (`src/lib/jellyfin-apiclient/connectionManager.js:434`). So whether an offline
+  start reaches the downloads is decided by which server was used last, and the
+  phantom always answering does not save it: with a real server most recent and
+  the network gone, the app shows "Server Unavailable" and never asks the
+  phantom. Nothing here can change that — it is jellyfin-web's code and the
+  overlay does not touch it. Worth knowing before reading an offline bug report,
+  and worth remembering that every fetch-based offline check passes straight
+  through it, because the worker answers a relative URL whatever the app believes.
 - **A worker cannot intercept a WebSocket.** No hook exists, and jellyfin-web will
   open one, because every item grid subscribes to `UserDataChanged` on mount
   (`emby-itemscontainer.js:294`). `ps-bootstrap.js` stands in for it.
