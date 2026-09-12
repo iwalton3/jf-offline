@@ -19,7 +19,8 @@ import '/web/plugin/vdx/ui/data/virtual-list.js';
 import { knownServers, SourceServer } from '/web/plugin/source.js';
 import {
     downloadItem, downloadSeries, removeDownload, listDownloads,
-    ensurePersistentStorage, inspectSubtitles, inspectSeries, cancelDownload, cancelAll
+    ensurePersistentStorage, inspectSubtitles, inspectSeries, inspectSeriesTracks,
+    cancelDownload, cancelAll
 } from '/web/plugin/downloader.js';
 
 // One request per automatic top-up, which happens when the list is
@@ -70,6 +71,8 @@ class OfflineSyncManager extends Component {
         askPicture: [],
         askServerWouldBurn: null,
         askContainer: '',
+        askInconsistent: false,
+        askNotes: [],
         // Which tree nodes are open, by node id.
         expanded: [],
         items_: null,
@@ -134,10 +137,14 @@ class OfflineSyncManager extends Component {
         .panel.busy { opacity: .55; }
         @media (prefers-reduced-motion: reduce) { .panel { transition: none; } }
 
+        /* max-height, not height: a two-row list should be two rows tall. A fixed
+           height left a tall empty region that still counted as a scroll container,
+           so the wheel went into something with nothing to scroll and went nowhere.
+           No overscroll containment either, for the same reason: with nothing to
+           scroll the page below it must still move. */
         .scroller {
-            height: ${LIST_HEIGHT}px;
+            max-height: ${LIST_HEIGHT}px;
             overflow-y: auto;
-            overscroll-behavior: contain;
         }
 
         .item {
@@ -234,6 +241,10 @@ class OfflineSyncManager extends Component {
         .caret.open { transform: rotate(90deg); }
         .caret.leaf { opacity: 0; }
         .node-group .name { font-weight: 600; }
+        /* The affordance and the binding have to be the same shape: pointer on the
+           row means the row is clickable. */
+        .item.node-group { cursor: pointer; }
+        .item.node-group button.act { cursor: pointer; }
         @media (prefers-reduced-motion: reduce) { .caret { transition: none; } }
 
         .warn {
@@ -497,6 +508,12 @@ class OfflineSyncManager extends Component {
         this.state.expanded = at === -1 ? open.concat([id]) : open.filter((x) => x !== id);
     }
 
+    /** The button sits inside the row, and the row toggles; stop it doing both. */
+    removeGroup(ev, node) {
+        if (ev && ev.stopPropagation) ev.stopPropagation();
+        this.removeMany(node.rows, node.title);
+    }
+
     removeMany(rows, label) {
         this.exclusive(`Removing ${label}`, async () => {
             for (const row of rows) await removeDownload(row);
@@ -523,6 +540,12 @@ class OfflineSyncManager extends Component {
     onListScroll(ev) {
         const el = ev.currentTarget;
         if (!el) return;
+        // Only when there is something to scroll AND something left to fetch.
+        // Without the first test a list shorter than its box reports zero
+        // remaining on every wheel event and asks for the next page each time.
+        if (el.scrollHeight <= el.clientHeight) return;
+        if (this.state.loadingItems) return;
+        if (this.state.itemsTotal && this.state.items.length >= this.state.itemsTotal) return;
         const remaining = el.scrollHeight - el.scrollTop - el.clientHeight;
         if (remaining < SCROLL_THRESHOLD) this.loadItems(true);
     }
@@ -570,11 +593,14 @@ class OfflineSyncManager extends Component {
             const isSeries = item.Type === 'Series';
             let series = null;
             let sample = item;
+            let consistency = null;
 
             if (isSeries) {
                 series = await inspectSeries(server, item);
                 sample = series.sample;
                 if (!sample) throw new Error('series has no episodes');
+                const episodes = (await server.episodes(item.Id)).Items || [];
+                consistency = await inspectSeriesTracks(server, episodes);
             }
 
             const inspected = await inspectSubtitles(server, sample);
@@ -604,6 +630,7 @@ class OfflineSyncManager extends Component {
             this.state.askSummary = series
                 ? `${series.episodes} episodes, ${series.unwatched} unwatched`
                 : '';
+            this.state.askInconsistent = !!(consistency && !consistency.consistent);
             this.state.askTranscode = !!inspected.willTranscode;
             this.state.askQuality = window.PS_SCHEMA.DEFAULT_QUALITY;
             this.state.askPicture = inspected.pictureTracks || [];
@@ -623,9 +650,25 @@ class OfflineSyncManager extends Component {
             quality: this.state.askQuality
         };
         this.state.asking = null;
-        const subtitle = choice === 'auto' || choice === 'none'
-            ? { mode: choice }
-            : { mode: 'burn', index: Number(choice) };
+        let subtitle;
+        if (choice === 'auto' || choice === 'none') {
+            subtitle = { mode: choice };
+        } else {
+            const index = Number(choice);
+            const track = this.state.askTracks.find((t) => t.index === index);
+            subtitle = { mode: 'burn', index };
+            // For a series the index is meaningless beyond the file it came from,
+            // so carry what the track is and let each episode resolve its own.
+            if (item.Type === 'Series' && track) {
+                subtitle.match = {
+                    language: track.language,
+                    codec: track.codec,
+                    isForced: track.isForced,
+                    title: track.title,
+                    canExtract: track.canExtract
+                };
+            }
+        }
         this.run(item, subtitle, audioChoice === '' ? null : Number(audioChoice), series);
     }
 
@@ -703,6 +746,7 @@ class OfflineSyncManager extends Component {
                     this.state.error = `${result.failures.length} of ${result.episodes} episodes failed: `
                         + result.failures.map((f) => f.name).join(', ');
                 }
+                this.state.askNotes = result.notes || [];
             } else {
                 await downloadItem(server, item, {
                     subtitle, audioStreamIndex, onProgress, quality: series.quality
@@ -800,11 +844,13 @@ class OfflineSyncManager extends Component {
 
         const label = node.kind === 'season' ? 'season' : (node.kind === 'series' ? 'series' : 'group');
         return html`
-            <div class="item node-group" style="padding-left:${0.85 + node.depth * 1.4}em">
+            <div class="item node-group"
+                style="padding-left:${0.85 + node.depth * 1.4}em"
+                on-click="${() => this.toggleNode(node.id)}">
                 <span class="caret ${node.open ? 'open' : ''}">▸</span>
-                <span class="name" on-click="${() => this.toggleNode(node.id)}">${node.title}</span>
+                <span class="name">${node.title}</span>
                 <span class="tag">${node.count} items · ${fmtBytes(node.bytes)}</span>
-                <button class="act" on-click="${() => this.removeMany(node.rows, node.title)}">Remove ${label}</button>
+                <button class="act" on-click="${(ev) => this.removeGroup(ev, node)}">Remove ${label}</button>
             </div>
         `;
     }
@@ -896,6 +942,13 @@ class OfflineSyncManager extends Component {
                     </div>
                 `)}
 
+                ${when(s.askNotes.length > 0, () => html`
+                    <div class="warn">
+                        <strong>${s.askNotes.length} episode(s) could not use the subtitle track you chose.</strong>
+                        ${s.askNotes.slice(0, 6).map((n) => n.name).join(', ')}${s.askNotes.length > 6 ? '…' : ''}
+                    </div>
+                `)}
+
                 <div class="statusline row" style="align-items:center">
                     ${when(!!s.status, () => html`<span class="note">${s.status}</span>`)}
                     ${when(!!s.error, () => html`<span class="bad">${s.error}</span>`)}
@@ -932,6 +985,17 @@ class OfflineSyncManager extends Component {
                                 ${s.askPicture.length} track(s) here are images rather than text
                                 (${s.askPicture.map((t) => t.codec).join(', ')}), so they cannot be
                                 extracted and will be absent offline unless you burn one in above.
+                            </div>
+                        `)}
+
+                        ${when(s.askInconsistent, () => html`
+                            <div class="warn">
+                                <strong>These episodes do not describe their subtitles the same way.</strong>
+                                Track numbering and languages differ between files in this show, so a
+                                single choice cannot simply be applied to all of them. Whatever you
+                                pick will be matched per episode by language and format; any episode
+                                with no equivalent is downloaded without burned-in subtitles and
+                                listed afterwards.
                             </div>
                         `)}
 

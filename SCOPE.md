@@ -54,6 +54,10 @@
   rather than left truncated, so a retry starts clean.
 - Music, books, photos, live TV.
 - Filtering by genre, year or rating. Search matches names only.
+- Arbitrating subtitle tracks per episode by hand. A series-wide choice is matched
+  per file by language and format; episodes with no unambiguous equivalent are
+  downloaded without burned-in subtitles and listed afterwards, which is a report
+  rather than a prompt.
 - Switching audio track or re-picking burned-in subtitles after download. Both are
   fixed at sync time by what the browser can do, and changing either means
   downloading the item again.

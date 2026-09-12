@@ -19,9 +19,39 @@
 
     // --- reading ----------------------------------------------------------
 
+    /**
+     * Everything held, with the parents of nothing left out.
+     *
+     * An items row for a Movie or an Episode means that file is on disk — the row
+     * is written when it downloads and deleted when it is removed. Series and
+     * Season rows are different: they are written so an episode has something to
+     * belong to, and they outlive their children. Left in, a show whose episodes
+     * were all deleted keeps appearing in search, in Next Up and on the home
+     * screen, and its page lists seasons that hold nothing.
+     *
+     * Derived here rather than pruned on delete, so it is right however the rows
+     * went away — a failed download, a cancelled one, a season filter that took
+     * nothing — instead of only on the path somebody remembered to clean up.
+     */
     async function loadAll() {
-        const [rows, ud] = await Promise.all([DB.all('items'), DB.all('userdata')]);
+        const [all, ud] = await Promise.all([DB.all('items'), DB.all('userdata')]);
         const udMap = new Map(ud.map((u) => [u.srv + ':' + u.itemId, u]));
+
+        const heldCount = new Map();
+        const bump = (id) => { if (id) heldCount.set(id, (heldCount.get(id) || 0) + 1); };
+        for (const row of all) {
+            if (row.dto.Type !== 'Episode') continue;
+            bump(row.dto.SeasonId);
+            bump(row.dto.SeriesId);
+        }
+
+        const rows = all.filter((row) => {
+            const type = row.dto.Type;
+            if (type !== 'Series' && type !== 'Season') return true;
+            return (heldCount.get(row.id) || 0) > 0;
+        });
+        for (const row of rows) row.heldCount = heldCount.get(row.id);
+
         return { rows, udMap };
     }
 
@@ -51,6 +81,14 @@
         // Everything we hold is playable; the source server's own flags described a
         // file this browser may never have been able to play.
         dto.LocationType = 'FileSystem';
+
+        // Counts describe what is here, not what the source server has. A show
+        // page saying "24 episodes" over the three that were downloaded is a
+        // worse answer than no number at all.
+        if (row.heldCount != null) {
+            dto.ChildCount = row.heldCount;
+            dto.RecursiveItemCount = row.heldCount;
+        }
         return dto;
     }
 

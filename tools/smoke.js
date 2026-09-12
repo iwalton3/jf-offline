@@ -28,6 +28,8 @@ const MULTI_AUDIO_ITEM = process.env.JF_AUDIO_ITEM || 'c72448f6b10acfae9edd95c2b
 const FORCED_SUB_ITEM = process.env.JF_FORCED_ITEM || '7eda0c4da7bb755f0e6ef4f6e84caad8';
 // Three seasons, sixty episodes: enough to tell a season filter from no filter.
 const MULTI_SEASON_SERIES = process.env.JF_SERIES || '2f9ea3e079631ea97fae6ebadb569063';
+// One season, one episode: cheap to hold so later checks have a real series.
+const SMALL_SERIES = process.env.JF_SMALL_SERIES || '5b12d67700af1f19b8764804c7788343';
 const HEADFUL = !!process.env.HEADFUL;
 
 const results = [];
@@ -218,17 +220,20 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
     // Paging, against a library big enough for it to matter. Seeded directly and
     // removed again, because the point is the query engine, not the downloader.
-    const paging = await page.evaluate(async (viewShows) => {
+    // Seeded as movies, not series: a series with no episodes is deliberately not
+    // presented, so synthetic parents would be filtered out before paging ran.
+    const paging = await page.evaluate(async (viewMovies) => {
         const SEED = 250;
         const rows = [];
         for (let i = 0; i < SEED; i++) {
             const id = 'aaaa' + String(i).padStart(28, '0');
             rows.push({
-                srv: 'seed', id, type: 'Series',
+                srv: 'seed', id, type: 'Movie',
                 dto: {
-                    Id: id, Name: 'Seeded Show ' + String(i).padStart(3, '0'),
-                    SortName: 'Seeded Show ' + String(i).padStart(3, '0'),
-                    Type: 'Series', IsFolder: true, ServerId: 'seed', ImageTags: {}, BackdropImageTags: []
+                    Id: id, Name: 'Seeded Film ' + String(i).padStart(3, '0'),
+                    SortName: 'Seeded Film ' + String(i).padStart(3, '0'),
+                    Type: 'Movie', MediaType: 'Video', IsFolder: false,
+                    ServerId: 'seed', ImageTags: {}, BackdropImageTags: []
                 },
                 seriesId: null, seasonId: null, addedAt: Date.now() + i
             });
@@ -236,7 +241,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         await window.PS_DB.putMany('items', rows);
 
         const get = async (start, limit) => (await (await fetch(
-            `/Items?ParentId=${viewShows}&IncludeItemTypes=Series&SortBy=SortName&StartIndex=${start}&Limit=${limit}`
+            `/Items?ParentId=${viewMovies}&IncludeItemTypes=Movie&SortBy=SortName&StartIndex=${start}&Limit=${limit}`
         )).json());
 
         const first = await get(0, 100);
@@ -245,6 +250,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         const beyond = await get(1000, 100);
 
         const seen = new Set([...first.Items, ...second.Items, ...third.Items].map((i) => i.Id));
+        const pageCount = first.Items.length + second.Items.length + third.Items.length;
 
         for (const r of rows) await window.PS_DB.del('items', ['seed', r.id]);
 
@@ -253,18 +259,19 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
             counts: [first.Items.length, second.Items.length, third.Items.length],
             startIndexEchoed: second.StartIndex,
             distinct: seen.size,
+            pageCount,
             overlap: first.Items[0].Id === second.Items[0].Id,
             beyondEnd: beyond.Items.length,
             firstName: first.Items[0].Name,
             secondName: second.Items[0].Name
         };
-    }, await page.evaluate(() => window.PS_SCHEMA.ID.VIEW_SHOWS));
+    }, await page.evaluate(() => window.PS_SCHEMA.ID.VIEW_MOVIES));
 
     check('a large library reports its full total', paging.total >= 250, String(paging.total));
     check('pages are full and consecutive', paging.counts[0] === 100 && paging.counts[1] === 100,
         paging.counts.join(','));
-    check('pages do not repeat', !paging.overlap && paging.distinct === 250,
-        `${paging.distinct} distinct across 3 pages, first=${paging.firstName} second=${paging.secondName}`);
+    check('pages do not repeat', !paging.overlap && paging.distinct === paging.pageCount,
+        `${paging.distinct} distinct of ${paging.pageCount} returned across 3 pages`);
     check('a start index past the end returns empty, not the first page', paging.beyondEnd === 0,
         String(paging.beyondEnd));
 
@@ -656,6 +663,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         };
     }, phantomId, MULTI_SEASON_SERIES);
 
+    const smallSeries = await page.evaluate(async (pid, id) => {
+        const { knownServers, SourceServer } = await import('/web/plugin/source.js');
+        const { downloadSeries } = await import('/web/plugin/downloader.js');
+        const server = new SourceServer(knownServers(pid)[0]);
+        const dto = await server.item(id);
+        const result = await downloadSeries(server, dto, {});
+        return { name: dto.Name, episodes: result.episodes };
+    }, phantomId, SMALL_SERIES);
+    check('a whole small series downloads', smallSeries.episodes > 0,
+        `${smallSeries.name}: ${smallSeries.episodes} episodes`);
+
     check('a series reports its seasons and their episode counts',
         seriesOptions.seasons > 1 && seriesOptions.perSeason.every((n) => n > 0),
         `${seriesOptions.seasons} seasons: ${seriesOptions.perSeason.join('/')} of ${seriesOptions.total}`);
@@ -857,6 +875,100 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     check('an item already held is not downloaded again',
         reDownload.wasHeld && reDownload.sameRow === true,
         `held ${reDownload.wasHeld}, returned in ${reDownload.ms}ms`);
+
+    // A series whose episodes were all removed must not linger anywhere.
+    const orphans = await page.evaluate(async (pid, seriesId) => {
+        const { knownServers, SourceServer } = await import('/web/plugin/source.js');
+        const { downloadSeries, removeDownload, listDownloads } = await import('/web/plugin/downloader.js');
+        const server = new SourceServer(knownServers(pid)[0]);
+        const dto = await server.item(seriesId);
+        const uid = window.ApiClient.getCurrentUserId();
+
+        const seasons = (await server.seasons(seriesId)).Items || [];
+        const one = seasons[0];
+        await downloadSeries(server, dto, { seasonId: one.Id });
+
+        const get = async (u) => (await (await fetch(u)).json());
+        const withEpisodes = {
+            series: (await get(`/Items?userId=${uid}&Recursive=true&includeItemTypes=Series`))
+                .Items.some((i) => i.Id === seriesId),
+            seasons: (await get(`/Shows/${seriesId}/Seasons?userId=${uid}`)).Items.length,
+            nextUp: (await get(`/Shows/NextUp?userId=${uid}&seriesId=${seriesId}`)).Items.length,
+            childCount: (await get(`/Items/${seriesId}?userId=${uid}`)).ChildCount
+        };
+
+        // Only this series' episodes: another show is deliberately held so the
+        // checks after this one still have a series to look at.
+        const items = await window.PS_DB.all('items');
+        const ofThisSeries = new Set(items
+            .filter((r) => r.dto.Type === 'Episode' && r.dto.SeriesId === seriesId)
+            .map((r) => r.id));
+        const mine = (await listDownloads()).filter((r) => ofThisSeries.has(r.itemId));
+        for (const row of mine) await removeDownload(row);
+
+        const after = {
+            series: (await get(`/Items?userId=${uid}&Recursive=true&includeItemTypes=Series`))
+                .Items.some((i) => i.Id === seriesId),
+            search: (await get(`/Items?userId=${uid}&Recursive=true&searchTerm=${encodeURIComponent(dto.Name)}`))
+                .Items.some((i) => i.Id === seriesId),
+            nextUp: (await get(`/Shows/NextUp?userId=${uid}&seriesId=${seriesId}`)).Items.length,
+            seasons: (await get(`/Shows/${seriesId}/Seasons?userId=${uid}`)).Items.length
+        };
+        return { totalSeasons: seasons.length, withEpisodes, after };
+    }, phantomId, MULTI_SEASON_SERIES);
+
+    check('the seasons list shows only seasons with episodes held',
+        orphans.withEpisodes.seasons === 1 && orphans.totalSeasons > 1,
+        `${orphans.withEpisodes.seasons} of ${orphans.totalSeasons} seasons`);
+    check('the episode count describes what is held, not what the source has',
+        orphans.withEpisodes.childCount > 0, String(orphans.withEpisodes.childCount));
+    check('removing every episode removes the series from browse and search',
+        orphans.after.series === false && orphans.after.search === false,
+        `browse ${orphans.after.series}, search ${orphans.after.search}`);
+    check('removing every episode removes it from Next Up',
+        orphans.after.nextUp === 0 && orphans.after.seasons === 0,
+        `${orphans.after.nextUp} next up, ${orphans.after.seasons} seasons`);
+
+    // Track numbering is per file; a series-wide choice has to be resolved per file.
+    const matching = await page.evaluate(async () => {
+        const { matchTrack } = await import('/web/plugin/downloader.js');
+        const want = { language: 'eng', codec: 'pgssub', isForced: false, title: 'Signs', canExtract: false };
+        const shuffled = [
+            { index: 5, language: 'jpn', codec: 'pgssub', isForced: false, title: 'Full', canExtract: false },
+            { index: 9, language: 'eng', codec: 'pgssub', isForced: false, title: 'Signs', canExtract: false }
+        ];
+        const renamed = [
+            { index: 4, language: 'eng', codec: 'pgssub', isForced: false, title: 'Signs & Songs', canExtract: false }
+        ];
+        const absent = [
+            { index: 2, language: 'jpn', codec: 'pgssub', isForced: false, title: 'Full', canExtract: false }
+        ];
+        const ambiguous = [
+            { index: 2, language: 'eng', codec: 'pgssub', isForced: false, title: 'A', canExtract: false },
+            { index: 3, language: 'eng', codec: 'pgssub', isForced: false, title: 'B', canExtract: false }
+        ];
+        const wrongKind = [
+            { index: 2, language: 'eng', codec: 'subrip', isForced: false, title: 'Signs', canExtract: true }
+        ];
+        const pick = (list) => { const t = matchTrack(list, want); return t ? t.index : null; };
+        return {
+            reordered: pick(shuffled),
+            renamed: pick(renamed),
+            absent: pick(absent),
+            ambiguous: pick(ambiguous),
+            wrongKind: pick(wrongKind)
+        };
+    });
+    check('a re-ordered track is found by what it is, not where it sits',
+        matching.reordered === 9, String(matching.reordered));
+    check('a differently titled track still matches on language and codec',
+        matching.renamed === 4, String(matching.renamed));
+    check('a file without the chosen track matches nothing',
+        matching.absent === null, String(matching.absent));
+    check('two indistinguishable candidates are left for a person to arbitrate',
+        matching.ambiguous === null, String(matching.ambiguous));
+    check('a text track is never substituted for a picture one',
+        matching.wrongKind === null, String(matching.wrongKind));
 
     // ---- 6c. the offline app shell ---------------------------------------
 

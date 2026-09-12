@@ -115,6 +115,26 @@ HEADFUL=1 ... node tools/smoke.js   # to watch it
   intercepted by that worker. Anything the worker reads to serve a response has to
   fall back to the cache, or it becomes the one page that fails offline.
 
+- **The library is what is HELD, derived, not pruned.** A Series or Season row is
+  written so an episode has a parent and outlives its children, so `loadAll`
+  presents one only while an episode still references it. Doing this at read time
+  rather than as a cleanup on delete means it is right however the rows went away
+  — a failed download, a cancel, a season filter that took nothing — and not only
+  on the path somebody remembered to clean up. Counts are recomputed for the same
+  reason: a show page saying "24 episodes" over the three that are here is worse
+  than no number.
+- **A subtitle track index is per file and a show is not required to be
+  consistent.** English can be index 2 in one episode and 4 in the next. A
+  series-wide choice therefore travels as what the track IS — language, codec,
+  forced, title — and is resolved against each file by `matchTrack`, which
+  declines when two candidates are indistinguishable rather than guessing. Burning
+  "index 2" across a season burns whatever happens to be second, which for anime is
+  routinely signs and songs.
+- **A fixed-height scroll container swallows the wheel when it has nothing to
+  scroll.** Use `max-height`. And an infinite-scroll handler must check that the
+  element can scroll at all, or a list shorter than its box reports zero remaining
+  on every wheel event and asks for the next page each time.
+
 ## The schema is shaped for features that do not exist yet
 
 `overlay/ps/schema.js` is the single definition, loaded in both the worker and the

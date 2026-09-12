@@ -196,6 +196,42 @@ export function audioOptions(mediaSource) {
     }));
 }
 
+/**
+ * Find the track a series-wide choice meant, in THIS file.
+ *
+ * Track indexes are per file and a show is not required to be consistent: the
+ * English track can be index 2 in one episode and index 4 in the next, and one
+ * episode may not have it at all. Burning in "index 2" across a season therefore
+ * burns in whatever happens to be second, which for anime is routinely the signs
+ * and songs track rather than the dialogue.
+ *
+ * So a series choice travels as what the track IS — language, codec, forced flag,
+ * title — and is resolved against each file. Returns null when this file has no
+ * equivalent, which is a thing to report rather than to guess around.
+ */
+export function matchTrack(tracks, want) {
+    if (!want) return null;
+    const norm = (v) => String(v == null ? '' : v).trim().toLowerCase();
+    const candidates = tracks.filter((t) => !t.canExtract === !want.canExtract);
+
+    const tiers = [
+        // Everything agrees, including the title an author gave it.
+        (t) => norm(t.language) === norm(want.language) && norm(t.codec) === norm(want.codec)
+            && !!t.isForced === !!want.isForced && norm(t.title) === norm(want.title),
+        (t) => norm(t.language) === norm(want.language) && norm(t.codec) === norm(want.codec)
+            && !!t.isForced === !!want.isForced,
+        (t) => norm(t.language) === norm(want.language) && !!t.isForced === !!want.isForced,
+        (t) => norm(t.language) === norm(want.language)
+    ];
+    for (const tier of tiers) {
+        const hit = candidates.filter(tier);
+        // Only when it is unambiguous. Two English picture tracks and no way to
+        // tell them apart is exactly the case a person has to arbitrate.
+        if (hit.length === 1) return hit[0];
+    }
+    return null;
+}
+
 async function downloadSubtitles(server, dto, mediaSource, tracks) {
     const held = [];
     for (const track of tracks) {
@@ -429,7 +465,24 @@ export async function downloadItem(server, reactiveDto, options = {}) {
 
     const tracks = subtitleOptions(mediaSource);
     const audio = audioOptions(mediaSource);
-    const burning = subtitle.mode === S().SUBTITLE_MODE.BURN && subtitle.index != null;
+
+    // A series choice arrives as a description; a single item's arrives as an
+    // index, because there was only ever one file to point at.
+    let burnTrack = null;
+    let subtitleNote = null;
+    if (subtitle.mode === S().SUBTITLE_MODE.BURN) {
+        if (subtitle.match) {
+            burnTrack = matchTrack(tracks, subtitle.match);
+            if (!burnTrack) {
+                subtitleNote = `no track matching ${subtitle.match.language || 'the chosen one'}`
+                    + ` (${subtitle.match.codec || 'unknown codec'}); left without burned-in subtitles`;
+            }
+        } else if (subtitle.index != null) {
+            burnTrack = tracks.find((t) => t.index === subtitle.index) || null;
+            if (!burnTrack) subtitleNote = `track ${subtitle.index} is not in this file`;
+        }
+    }
+    const burning = !!burnTrack;
 
     // A chosen audio track that is not the container's own default can only be
     // delivered by transcoding: the file holds every track, and the browser plays
@@ -481,7 +534,8 @@ export async function downloadItem(server, reactiveDto, options = {}) {
         bitrate: mediaSource.Bitrate || 0,
         quality: options.quality || S().DEFAULT_QUALITY,
         subtitleMode: subtitle.mode,
-        burnedSubtitleIndex: burning ? subtitle.index : null,
+        burnedSubtitleIndex: burning ? burnTrack.index : null,
+        subtitleNote,
         subtitles: [],
         attachments: [],
         trickplay: null,
@@ -500,7 +554,7 @@ export async function downloadItem(server, reactiveDto, options = {}) {
     try {
         const transcodeParams = {};
         if (burning) {
-            transcodeParams.SubtitleStreamIndex = subtitle.index;
+            transcodeParams.SubtitleStreamIndex = burnTrack.index;
             transcodeParams.SubtitleMethod = 'Encode';
         } else {
             // -1 is "no subtitles", and saying so is not optional. Leave the index
@@ -525,6 +579,8 @@ export async function downloadItem(server, reactiveDto, options = {}) {
         // Sidecars only make sense when nothing was burned in: a burned track is
         // in the picture, and offering it again as a switchable overlay would
         // draw it twice.
+        // When a burn-in was asked for and this file had no equivalent track, take
+        // the text tracks instead: something readable beats nothing at all.
         const held = burning || subtitle.mode === S().SUBTITLE_MODE.NONE
             ? []
             : await downloadSubtitles(server, dto, mediaSource, tracks.filter((t) => t.canExtract));
@@ -632,6 +688,7 @@ export async function downloadSeries(server, reactiveSeriesDto, options = {}) {
 
     seriesCancelled = false;
     const failures = [];
+    const notes = [];
     let taken = 0;
     for (let i = 0; i < list.length; i++) {
         // Checked between episodes as well as inside each one: cancelling episode
@@ -639,11 +696,12 @@ export async function downloadSeries(server, reactiveSeriesDto, options = {}) {
         if (seriesCancelled) break;
         onProgress(i, list.length, 'episodes', list[i].Name);
         try {
-            await downloadItem(server, list[i], {
+            const row = await downloadItem(server, list[i], {
                 subtitle: options.subtitle,
                 audioStreamIndex: options.audioStreamIndex,
                 quality: options.quality
             });
+            if (row && row.subtitleNote) notes.push({ name: list[i].Name, note: row.subtitleNote });
             taken++;
         } catch (err) {
             if (err.cancelled) break;
@@ -652,7 +710,40 @@ export async function downloadSeries(server, reactiveSeriesDto, options = {}) {
         }
     }
     onProgress(taken, list.length, 'episodes');
-    return { episodes: taken, planned: list.length, failures, cancelled: seriesCancelled };
+    return { episodes: taken, planned: list.length, failures, notes, cancelled: seriesCancelled };
+}
+
+/**
+ * Do the episodes of this series describe their subtitles the same way?
+ *
+ * Sampled rather than exhaustive: asking the server for PlaybackInfo on sixty
+ * episodes to draw one dialog is not a reasonable thing to do to somebody's
+ * server. A few files is enough to tell a consistent show from an inconsistent
+ * one, and the per-episode matching handles the rest at download time.
+ */
+export async function inspectSeriesTracks(server, episodes, sampleSize = 4) {
+    const step = Math.max(1, Math.floor(episodes.length / sampleSize));
+    const sample = [];
+    for (let i = 0; i < episodes.length && sample.length < sampleSize; i += step) sample.push(episodes[i]);
+
+    const seen = [];
+    for (const episode of sample) {
+        try {
+            const info = await server.playbackInfo(episode.Id);
+            const ms = pickMediaSource(info.MediaSources || []);
+            if (ms) seen.push({ name: episode.Name, tracks: subtitleOptions(ms) });
+        } catch {
+            // A file that will not describe itself is one the download will report.
+        }
+    }
+    if (seen.length < 2) return { sampled: seen.length, consistent: true, shape: seen[0] ? seen[0].tracks : [] };
+
+    const shape = (tracks) => tracks
+        .map((t) => `${t.index}:${t.language}:${t.codec}:${t.isForced ? 'f' : ''}`)
+        .join('|');
+    const first = shape(seen[0].tracks);
+    const consistent = seen.every((e) => shape(e.tracks) === first);
+    return { sampled: seen.length, consistent, shape: seen[0].tracks, seen };
 }
 
 /** Seasons and episode counts, for the question asked before a series download. */
