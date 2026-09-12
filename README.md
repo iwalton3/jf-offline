@@ -231,7 +231,12 @@ overlay/              the diff against an unmodified build
 tools/
   probe-requests.js     records what jellyfin-web really asks for, against a real server
   remux-probe.py        measures whether the server copies a stream or re-encodes it
+  userdata-probe.py     measures what a real UserDataChanged push carries
   smoke.js              end-to-end test in a real browser
+docs/
+  the-store.md          what is kept where, and what a version bump does
+  applying-review-findings.md
+  rounds/               the record of each review round
 ```
 
 `schema.js`, `db.js` and `opfs.js` are loaded in **both** contexts — `importScripts`

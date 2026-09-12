@@ -23,6 +23,12 @@ would be judged by them:
   download the cancel landed. This is the promise; "never recorded COMPLETE" was
   a narrower one that the code stopped keeping. `CLAUDE.md` carries the long
   version and the supersession.
+- **The database keeps its version bump, and a stranded tab is told why.** The
+  bump that indexed two hot-path lookups stays. What it cost was that a build
+  which cannot open the store had nothing to say about it, and a person met the
+  browser's own error page instead. Both version disagreements now carry a
+  sentence they can act on. `docs/the-store.md` has the shape, including the one
+  upgrade this cannot help.
 
 ## What a UserDataChanged push contains
 

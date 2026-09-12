@@ -6,7 +6,17 @@ Guidance for working in this repository.
 
 A service worker that impersonates a Jellyfin server so an **unmodified,
 unrecompiled jellyfin-web** browses and plays media held in the browser.
-`README.md` is the orientation; `SCOPE.md` says what v0 deliberately omits.
+`README.md` is the orientation; `SCOPE.md` says what v0 deliberately omits and
+what the owner has settled about it.
+
+`docs/` holds the longer accounts this file only warns about:
+
+- `docs/the-store.md` — what is kept where, the three lifetimes bytes have, and
+  what a database version bump does.
+- `docs/applying-review-findings.md` — **read this before applying a review
+  round.** Findings are not the unit of work here, and the enumeration happens
+  before the first patch rather than after it.
+- `docs/rounds/` — the record of each round, kept before any of it is applied.
 
 ## Ground rules
 
@@ -308,7 +318,8 @@ page. Four decisions there are load-bearing and should not be "simplified":
 
 ## Layout
 
-Files are listed in `README.md`. The short version: `overlay/ps/` is the worker,
+Files are listed in `README.md` and `docs/` explains the store. The short
+version: `overlay/ps/` is the worker,
 `overlay/plugin/` is the download manager UI in vdx-web, `serve.py` is the dev
 host, and `overlay/` as a whole is the diff against an unmodified jellyfin-web
 build.
