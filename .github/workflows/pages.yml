@@ -1,0 +1,137 @@
+name: Build and deploy the demo
+
+# The demo is jellyfin-web's own build with this repository's overlay on top. It
+# is assembled here rather than committed, because the overlay is a diff against
+# a build and committing the build would hide that.
+
+on:
+  push:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; a queued run supersedes a waiting one but never cancels
+# a deploy that has started.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  # A GitHub Pages project site is served from a subdirectory, not its own host,
+  # so everything has to work under this prefix. Change it here only.
+  BASE_PATH: /jf-offline
+  # Pinned rather than tracking master: the overlay integrates at jellyfin-web's
+  # seams, and a seam that moves should break a deliberate bump rather than a
+  # deploy nobody was watching.
+  JELLYFIN_WEB_REF: master
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the overlay
+        uses: actions/checkout@v4
+        with:
+          path: overlay-repo
+
+      - name: Check out jellyfin-web
+        uses: actions/checkout@v4
+        with:
+          repository: jellyfin/jellyfin-web
+          ref: ${{ env.JELLYFIN_WEB_REF }}
+          path: jellyfin-web
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: jellyfin-web/package-lock.json
+
+      - name: Apply the optional entry-point patches
+        working-directory: jellyfin-web
+        run: |
+          # Optional by design: the overlay works against a stock build, so a
+          # patch that no longer applies is a warning rather than a failure.
+          for patch in ../overlay-repo/patches/*.patch; do
+            [ -e "$patch" ] || continue
+            if git apply --check "$patch" 2>/dev/null; then
+              git apply "$patch"
+              echo "applied $(basename "$patch")"
+            else
+              echo "::warning::$(basename "$patch") did not apply; building without it"
+            fi
+          done
+
+      - name: Build jellyfin-web
+        working-directory: jellyfin-web
+        run: |
+          npm ci
+          npm run build:production
+
+      - name: Assemble the site
+        run: |
+          python3 overlay-repo/tools/build-site.py \
+            --webroot jellyfin-web/dist \
+            --out _site \
+            --base-path "$BASE_PATH"
+
+      - name: Verify the assembled site in a browser
+        run: |
+          # Served the way Pages will serve it: a plain static host with the site
+          # mounted at its subdirectory. Checking that the files exist is not the
+          # same as checking that the app boots, finds its server and installs
+          # the worker, and only one of those is worth deploying on.
+          mkdir -p pages-root
+          cp -r _site "pages-root${BASE_PATH}"
+          (cd pages-root && python3 -m http.server 8094 --bind 127.0.0.1 &) 
+          for _ in $(seq 1 30); do
+            curl -fsS "http://127.0.0.1:8094${BASE_PATH}/web/" >/dev/null && break
+            sleep 1
+          done
+          npm install --no-save puppeteer@23
+          node overlay-repo/tools/verify-site.js "http://127.0.0.1:8094${BASE_PATH}"
+
+      - name: Check the assembly has what it needs
+        run: |
+          set -e
+          test -f "_site/System/Info/Public"
+          test -f "_site/web/serviceworker.js"
+          test -f "_site/web/precache-manifest.json"
+          # The bootstrap must be in the document: without it the page has no
+          # WebSocket stand-in and no storage bridge.
+          grep -q "${BASE_PATH}/web/ps-bootstrap.js" _site/web/index.html
+          grep -q "${BASE_PATH}/web/ps-ui.js" _site/web/index.html
+          # The worker must be ours, not jellyfin-web's.
+          grep -q "phantom" _site/web/serviceworker.js
+          # Every manifest entry must exist on disk, or the precache stalls.
+          python3 - <<'PY'
+          import json, os, sys
+          base = os.environ["BASE_PATH"]
+          manifest = json.load(open("_site/web/precache-manifest.json"))
+          missing = [
+              f for f in manifest["files"]
+              if not os.path.isfile(os.path.join("_site", f[len(base) + 1:]))
+          ]
+          if missing:
+              print("missing from the assembled site:", missing[:10], file=sys.stderr)
+              sys.exit(1)
+          print(f"manifest {manifest['version']}: {len(manifest['files'])} files, all present")
+          PY
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

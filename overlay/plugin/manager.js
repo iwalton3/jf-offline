@@ -13,15 +13,25 @@
  *    appearing does not shove the list out from under the pointer.
  */
 
-import { Component, defineComponent, html, each, when } from '/web/plugin/vdx/lib/framework.js';
-import '/web/plugin/vdx/ui/selection/dropdown.js';
-import '/web/plugin/vdx/ui/data/virtual-list.js';
-import { knownServers, SourceServer } from '/web/plugin/source.js';
+/* This module has exactly one URL: <base>/web/plugin/manager.js, a real file the
+ * host serves. jellyfin-web's plugin page reaches it through a three-line shim
+ * the worker generates, and ps-ui.js imports it directly.
+ *
+ * That matters because the shim's own URL only exists inside the service worker,
+ * and a page is NOT controlled by the worker on its first visit — so a modal
+ * that imported the shim failed with "failed to fetch dynamically imported
+ * module" until the second load. Relative specifiers below resolve from this
+ * file's own directory, which is what makes a deployment in a subdirectory work
+ * without rewriting anything. */
+import { Component, defineComponent, html, each, when } from './vdx/lib/framework.js';
+import './vdx/ui/selection/dropdown.js';
+import './vdx/ui/data/virtual-list.js';
+import { knownServers, SourceServer } from './source.js';
 import {
     downloadItem, downloadSeries, removeDownload, listDownloads,
     ensurePersistentStorage, inspectSubtitles, inspectSeries, inspectSeriesTracks,
     inspectEpisodeTracks, bulkSelect, cancelDownload, cancelAll
-} from '/web/plugin/downloader.js';
+} from './downloader.js';
 
 // One request per automatic top-up, which happens when the list is
 // scrolled near its end. There is no Load more button: the list is windowed.
@@ -332,6 +342,35 @@ class OfflineSyncManager extends Component {
 
     unmounted() {
         if (this._offPrecache) this._offPrecache();
+    }
+
+    /**
+     * Open straight onto one item's download question.
+     *
+     * Called by ps-ui.js when jellyfin-web's context menu asks to sync a specific
+     * thing, so the person does not have to find it again in a list they were
+     * already looking at.
+     */
+    async openFor(serverId, itemId) {
+        // Read here rather than trusting mounted() to have run: the modal calls
+        // this as soon as the element upgrades, which is before its async mount
+        // has finished populating the server list.
+        if (!this.state.servers.length) {
+            this.state.servers = knownServers(window.PS_SCHEMA.ID.SERVER);
+        }
+        const match = this.state.servers.find((srv) => srv.id === serverId);
+        if (match) this.state.serverId = match.id;
+        else if (this.state.servers.length === 1) this.state.serverId = this.state.servers[0].id;
+        if (!this.state.serverId) return;
+
+        await this.loadViews();
+        const server = this.server();
+        if (!server) return;
+        try {
+            this.start(await server.item(itemId));
+        } catch (err) {
+            this.state.error = String(err && err.message || err);
+        }
     }
 
     // --- data -------------------------------------------------------------
@@ -1072,16 +1111,31 @@ class OfflineSyncManager extends Component {
         `;
     }
 
+    /** What the rows say is held, which is the number the list adds up to. */
+    heldBytes() {
+        return (this.state.downloads || []).reduce((n, row) => n + (row.bytesDone || 0), 0);
+    }
+
     renderStorage() {
-        // Used only, no percentage and no bar. Chromium does not report a real
-        // quota: it answers with roughly what you are using plus a constant, so a
-        // "13.4 GB available" reading moves as you download and says nothing about
-        // the disk. A number we cannot stand behind is worse than no number.
-        const { usage } = this.state.storage;
+        // Our own total, not navigator.storage.estimate(). Two reasons, and the
+        // second is why this changed: Chromium does not report a real quota (it
+        // answers roughly usage plus a constant, to defeat fingerprinting), and
+        // its usage figure lags a long way behind what has actually been written
+        // — measured at 0.5 GB against 4.4 GB of downloads. A number that
+        // disagrees with the list above it is worse than no number.
+        const held = this.heldBytes();
+        const estimate = this.state.storage.usage || 0;
         return html`
             <div>
                 <h3>Storage</h3>
-                <p class="note">Downloads are using ${fmtBytes(usage)}.</p>
+                <p class="note">Downloads are using ${fmtBytes(held)}.</p>
+                ${when(estimate > 0 && Math.abs(estimate - held) > held * 0.25, () => html`
+                    <p class="note">
+                        The browser reports ${fmtBytes(estimate)} for this site, which it
+                        updates lazily and rounds heavily. The figure above is the sum of
+                        what was downloaded.
+                    </p>
+                `)}
                 <div class="statusline" style="margin-top:.5em">
                     ${when(this.state.persisted, () => html`
                         <span class="note good">Storage is persistent. Downloads stay until you remove them.</span>

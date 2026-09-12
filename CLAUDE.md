@@ -153,6 +153,21 @@ HEADFUL=1 ... node tools/smoke.js   # to watch it
   `assertAllowed`, called from the downloader rather than from the UI, because
   the UI is a suggestion and the downloader is what issues requests.
 
+- **The page is NOT controlled by the worker on its first visit.** Anything the
+  UI needs immediately must therefore be a real file the host serves, not a URL
+  the worker synthesises. The download manager lives at
+  `overlay/plugin/manager.js` for exactly this reason; jellyfin-web's plugin page
+  reaches it through a one-line re-export the worker generates, because
+  jellyfin-web insists on loading a controller from `configurationpage?name=…`.
+- **Deployment may be in a subdirectory.** GitHub Pages project sites are.
+  `PS_SCHEMA.basePath` is derived (from the worker's registration scope, or the
+  page's own location) and the router strips it before matching, so routes stay
+  written as if mounted at the root. Module specifiers are relative for the same
+  reason — an absolute `/web/...` only resolves at an origin root.
+- **`navigator.storage.estimate().usage` lags badly**, measured at 0.5 GB against
+  4.4 GB actually written. The settings page sums the download rows instead,
+  which is the number the list adds up to.
+
 ## The schema is shaped for features that do not exist yet
 
 `overlay/ps/schema.js` is the single definition, loaded in both the worker and the

@@ -10,6 +10,20 @@ that the app cannot tell from a server on the network.
 
 This is a v0 spike. See `SCOPE.md` for what it deliberately does not do.
 
+## The demo
+
+`https://iwalton3.github.io/jf-offline/` — built and deployed by
+`.github/workflows/pages.yml` on every push, from jellyfin-web's own source plus
+this overlay. Nothing is committed pre-built.
+
+A Pages project site lives in a subdirectory rather than on its own host, so the
+whole thing runs under a base path: the worker derives it from its registration
+scope, and `tools/build-site.py` writes the three things `serve.py` normally does
+at request time into files, because a static host cannot do them. CI serves the
+assembled site from a plain static host and drives it in a browser
+(`tools/verify-site.js`) before deploying, since "the files are present" and "the
+app boots and finds its server" are different claims.
+
 ## Running it
 
 ```sh
@@ -54,6 +68,15 @@ The host publishes `/web/precache-manifest.json` (a build artifact in a real
 deployment) and the worker holds the lot — about 55 MB — resumably in the
 background, because a worker doing that many fetches will be killed part-way. The
 settings page shows the progress.
+
+### An optional jellyfin-web patch
+
+`patches/` adds two entry points to jellyfin-web: **Manage Downloads** in the user
+menu and **Sync Offline** in an item's context menu, each opening the manager in a
+near-full-page modal. Thirty-seven lines across two files, and every entry is
+guarded on `window.__phantom?.ui`, so a build without the patch is unaffected and
+the manager stays reachable through its Offline Sync settings page. CI warns and
+carries on if a patch no longer applies.
 
 ### Two things the host must do
 

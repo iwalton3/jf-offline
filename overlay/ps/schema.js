@@ -107,6 +107,28 @@
     // OPFS lives under one root so a wipe is one removeEntry call.
     const OPFS_ROOT = 'phantom';
 
+    /**
+     * The path this deployment is mounted at, '' at an origin root.
+     *
+     * GitHub Pages gives a project site a subdirectory rather than a host, so the
+     * app lands at /jf-offline/web/ and the phantom server has to answer
+     * /jf-offline/Items. Derived rather than configured, and from a different
+     * source in each context: the worker knows its own registration scope, and
+     * the page knows where it was served from.
+     */
+    function basePath() {
+        try {
+            const path = (self.registration && self.registration.scope)
+                ? new URL(self.registration.scope).pathname
+                : self.location.pathname;
+            const at = path.indexOf('/web/');
+            if (at > 0) return path.slice(0, at);
+        } catch {
+            // Fall through to the root, which is right for the dev host.
+        }
+        return '';
+    }
+
     const paths = {
         mediaDir: (srv, itemId, sourceId) => ['media', srv, itemId, sourceId],
         original: (srv, itemId, sourceId, container) =>
@@ -131,5 +153,8 @@
         image: (srv, itemId, type) => ['images', srv, itemId, String(type).toLowerCase()]
     };
 
-    g.PS_SCHEMA = { ID, VIEWS, DB, DOWNLOAD_STATE, DOWNLOAD_MODE, SUBTITLE_MODE, QUALITIES, DEFAULT_QUALITY, SET_BY, TICKS_PER_MS, OPFS_ROOT, paths };
+    g.PS_SCHEMA = {
+        ID, VIEWS, DB, DOWNLOAD_STATE, DOWNLOAD_MODE, SUBTITLE_MODE, QUALITIES, DEFAULT_QUALITY,
+        SET_BY, TICKS_PER_MS, OPFS_ROOT, paths, basePath: basePath()
+    };
 })(self);

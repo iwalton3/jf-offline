@@ -1,0 +1,77 @@
+diff --git a/src/components/itemContextMenu.js b/src/components/itemContextMenu.js
+index 7b71363d13..f5b945720f 100644
+--- a/src/components/itemContextMenu.js
++++ b/src/components/itemContextMenu.js
+@@ -191,6 +191,17 @@ export async function getCommands(options) {
+             });
+         }
+ 
++        // Offline Sync: only when the phantom service worker is installed, and
++        // only for the types it can hold.
++        if (window.__phantom?.ui
++            && [ 'Movie', 'Episode', 'Series', 'Season', 'Video' ].includes(item.Type)) {
++            commands.push({
++                name: 'Sync Offline',
++                id: 'syncoffline',
++                icon: 'cloud_download'
++            });
++        }
++
+         // Books are promoted to major download Button and therefor excluded in the context menu
+         if (item.CanDownload && item.Type !== 'Book') {
+             commands.push({
+@@ -412,6 +423,10 @@ function executeCommand(item, id, options) {
+                     }).then(getResolveFunction(resolve, id, true), getResolveFunction(resolve, id));
+                 });
+                 break;
++            case 'syncoffline':
++                window.__phantom?.ui?.open({ serverId, itemId });
++                getResolveFunction(resolve, id)();
++                break;
+             case 'download':
+                 import('../scripts/fileDownloader').then((fileDownloader) => {
+                     const url = getLibraryApi(api).getDownloadUrl({ itemId });
+diff --git a/src/components/toolbar/AppUserMenu.tsx b/src/components/toolbar/AppUserMenu.tsx
+index 58b9d4d560..b5bfdb6324 100644
+--- a/src/components/toolbar/AppUserMenu.tsx
++++ b/src/components/toolbar/AppUserMenu.tsx
+@@ -38,6 +38,11 @@ const AppUserMenu: FC<AppUserMenuProps> = ({
+     const { user } = useApi();
+     const { data: isQuickConnectEnabled } = useQuickConnectEnabled();
+ 
++    const onManageOfflineClick = useCallback(() => {
++        onMenuClose();
++        (window as unknown as { __phantom?: { ui?: { open: () => void } } }).__phantom?.ui?.open();
++    }, [ onMenuClose ]);
++
+     const onDownloadManagerClick = useCallback(() => {
+         shell.openDownloadManager();
+         onMenuClose();
+@@ -104,10 +109,26 @@ const AppUserMenu: FC<AppUserMenuProps> = ({
+                 </ListItemText>
+             </MenuItem>
+ 
+-            {(appHost.supports(AppFeature.DownloadManagement) || appHost.supports(AppFeature.ClientSettings)) && (
++            {(appHost.supports(AppFeature.DownloadManagement) || appHost.supports(AppFeature.ClientSettings)
++                || (typeof window !== 'undefined' && (window as unknown as { __phantom?: { ui?: unknown } }).__phantom?.ui)) && (
+                 <Divider />
+             )}
+ 
++            {/* Offline Sync: present only when the phantom service worker is
++                installed, so a stock build is unaffected. */}
++            {typeof window !== 'undefined' && (window as unknown as { __phantom?: { ui?: unknown } }).__phantom?.ui && (
++                <MenuItem
++                    onClick={onManageOfflineClick}
++                >
++                    <ListItemIcon>
++                        <Download />
++                    </ListItemIcon>
++                    <ListItemText>
++                        {'Manage Downloads'}
++                    </ListItemText>
++                </MenuItem>
++            )}
++
+             {appHost.supports(AppFeature.DownloadManagement) && (
+                 <MenuItem
+                     onClick={onDownloadManagerClick}

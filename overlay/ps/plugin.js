@@ -76,16 +76,20 @@
             return text(PAGE_HTML, 'text/html; charset=utf-8');
         }
         if (name === PAGE_NAME + '.js') {
-            // The controller is an ES module imported by the app. It is a real file
-            // on the overlay; reading it here keeps exactly one copy of it.
-            //
-            // A fetch() issued from inside a worker is a real network request and is
-            // NOT intercepted by this worker, so a plain fetch made the download
-            // manager the one page that did not work offline. The cache is the same
-            // one the app shell precache fills, so the fallback always has it.
-            const body = await readOverlayFile('/web/plugin/controller.js');
-            if (body == null) return notFound('controller');
-            return text(body, 'text/javascript; charset=utf-8');
+            // A shim, not the module itself. jellyfin-web insists on loading a
+            // plugin controller from configurationpage?name=…, a URL that only
+            // exists inside this worker; the manager proper lives at a real file
+            // so that ps-ui.js can import it on a first visit, before the worker
+            // controls anything. Generated rather than stored, so there is no
+            // second copy to drift.
+            // A static re-export, not a dynamic import: the module graph is then
+            // fetched in parallel with no top-level await, which is a round trip
+            // the plugin page would otherwise spend before it can render.
+            const url = g.PS_SCHEMA.basePath + '/web/plugin/manager.js';
+            return text(
+                `export { default } from '${url}';\n`,
+                'text/javascript; charset=utf-8'
+            );
         }
         return notFound('configuration page ' + name);
     }

@@ -46,18 +46,20 @@ RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
 
 # Injected ahead of jellyfin-web's own bundle; the same list the worker uses when
 # it serves index.html from cache.
-BOOTSTRAP_TAGS = "".join(
-    f'<script src="{src}"></script>'
-    for src in (
-        "/web/ps/schema.js",
-        "/web/ps/db.js",
-        "/web/ps/opfs.js",
-        "/web/ps-bootstrap.js",
-    )
+BOOTSTRAP_SCRIPTS = (
+    "/web/ps/schema.js",
+    "/web/ps/db.js",
+    "/web/ps/opfs.js",
+    "/web/ps-bootstrap.js",
+    "/web/ps-ui.js",
 )
 
 
-def build_manifest(webroot):
+def bootstrap_tags(base):
+    return "".join(f'<script src="{base}{src}"></script>' for src in BOOTSTRAP_SCRIPTS)
+
+
+def build_manifest(webroot, base="", overlay=None):
     """Every file the app needs offline, with a version that changes when they do.
 
     A real deployment generates this at build time. It exists because the app is
@@ -68,13 +70,14 @@ def build_manifest(webroot):
     Source maps are excluded; nothing loads them unless devtools is open.
     """
     files = []
-    for base, prefix in ((OVERLAY, ""), (webroot, "")):
-        for root, _dirs, names in os.walk(base):
+    roots = (webroot,) if overlay is False else (OVERLAY, webroot)
+    for source_root in roots:
+        for root, _dirs, names in os.walk(source_root):
             for name in names:
                 if name.endswith(".map"):
                     continue
                 full = os.path.join(root, name)
-                rel = os.path.relpath(full, base).replace(os.sep, "/")
+                rel = os.path.relpath(full, source_root).replace(os.sep, "/")
                 files.append((rel, os.path.getsize(full), int(os.path.getmtime(full))))
 
     # Overlay wins, as it does when serving.
@@ -89,7 +92,7 @@ def build_manifest(webroot):
 
     return {
         "version": digest.hexdigest()[:12],
-        "files": ["/web/" + rel for rel in sorted(seen)],
+        "files": [base + "/web/" + rel for rel in sorted(seen)],
     }
 
 
@@ -116,6 +119,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def resolve(self, path):
         """Map a URL path to a file, overlay first."""
+        path = self.strip_base(path)
         if path == "/" or path == "":
             return None  # handled as a redirect
         if not path.startswith("/web/"):
@@ -152,11 +156,18 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header(k, v)
         self.end_headers()
 
+    def strip_base(self, path):
+        """The deployment may be mounted in a subdirectory; routes are not."""
+        base = self.server.base
+        if base and path.startswith(base):
+            return path[len(base):] or "/"
+        return path
+
     def do_GET(self, body=True):
-        path = self.path.split("?", 1)[0]
+        path = self.strip_base(self.path.split("?", 1)[0])
 
         if path == "/web/precache-manifest.json":
-            payload = json.dumps(build_manifest(self.server.webroot)).encode()
+            payload = json.dumps(build_manifest(self.server.webroot, self.server.base)).encode()
             self.send_response(200)
             self.send_common("application/json; charset=utf-8", len(payload))
             if body:
@@ -182,7 +193,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if path in ("/", ""):
             self.send_response(302)
-            self.send_header("Location", "/web/")
+            self.send_header("Location", self.server.base + "/web/")
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
@@ -201,10 +212,11 @@ class Handler(BaseHTTPRequestHandler):
 
         if os.path.basename(target) == "index.html":
             html = open(target, "rb").read().decode("utf-8")
+            tags = bootstrap_tags(self.server.base)
             marker = html.find("<head>")
             injected = (
-                BOOTSTRAP_TAGS + html if marker == -1
-                else html[: marker + 6] + BOOTSTRAP_TAGS + html[marker + 6 :]
+                tags + html if marker == -1
+                else html[: marker + 6] + tags + html[marker + 6 :]
             ).encode()
             self.send_response(200)
             self.send_common("text/html; charset=utf-8", len(injected))
@@ -279,6 +291,11 @@ def main():
     )
     ap.add_argument("--port", type=int, default=8099)
     ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument(
+        "--base-path",
+        default="",
+        help="subdirectory the site is mounted at, e.g. /jf-offline for a GitHub Pages project site",
+    )
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -290,10 +307,11 @@ def main():
     httpd.webroot = webroot
     httpd.verbose = args.verbose
     httpd.server_id = phantom_server_id()
+    httpd.base = args.base_path.rstrip("/")
     print(f"overlay  {OVERLAY}")
     print(f"webroot  {webroot}")
     print(f"server   {httpd.server_id}")
-    print(f"serving  http://{args.host}:{args.port}/web/")
+    print(f"serving  http://{args.host}:{args.port}{httpd.base}/web/")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

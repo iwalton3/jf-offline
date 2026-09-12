@@ -1215,7 +1215,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
             isView: html.includes('data-role="page"') && html.includes('data-controller="__plugin/offlinesync.js"'),
             survivesTranslate: !html.includes('${'),
             jsType: jsRes.headers.get('Content-Type'),
-            jsIsModule: js.includes('export default'),
+            jsIsModule: /export\s*\{\s*default/.test(js) || js.includes('export default'),
             menu: pages.map((p) => p.DisplayName)
         };
     });
@@ -1226,7 +1226,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
     // The settings page has to mount inside the running app, not just parse.
     await page.goto(`${APP}/web/#/configurationpage?name=offlinesync`, { waitUntil: 'networkidle2', timeout: 45000 });
-    await sleep(4000);
+    await page.waitForFunction(() => !!document.querySelector('offline-sync-manager'), { timeout: 20000 })
+        .catch(() => {});
+    await sleep(2500);
     const mounted = await page.evaluate(() => {
         const el = document.querySelector('offline-sync-manager');
         return { present: !!el, rendered: !!(el && el.shadowRoot ? el.shadowRoot.textContent : el && el.textContent || '').match(/Download/i) };
@@ -1281,6 +1283,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         uiPaging.error || `${uiPaging.afterFirst} then ${uiPaging.afterSecond} of ${uiPaging.total}`);
     const rowState = await page.evaluate(async () => {
         const el = document.querySelector('offline-sync-manager');
+        if (!el) return { count: 0, disabled: 0, error: 'settings page did not mount' };
         const root = el.shadowRoot || el;
         // Filtering sets the component busy for the length of the request the rows
         // are drawn by; a row that reads `busy` is memoised in that state for good.
@@ -1389,6 +1392,86 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         !uiPaging.error && uiPaging.distinct === uiPaging.afterSecond,
         uiPaging.error || `${uiPaging.distinct} distinct of ${uiPaging.afterSecond}`);
 
+    // ---- 8b. the modal, and the optional jellyfin-web patch --------------
+
+    const modal = await page.evaluate(async (pid) => {
+        if (!window.__phantom || !window.__phantom.ui) return { error: 'no ui api' };
+        await window.__phantom.ui.open();
+        await new Promise((r) => setTimeout(r, 2000));
+        const panel = document.querySelector('.phantom-modal');
+        const manager = panel && panel.querySelector('offline-sync-manager');
+        const root = manager && (manager.shadowRoot || manager);
+        const state = {
+            open: !!panel,
+            upgraded: manager ? typeof manager._parseAttributes === 'function' : false,
+            rendered: !!(root && /Downloaded|servers/i.test(root.textContent || '')),
+            scrollLocked: document.documentElement.style.overflow === 'hidden'
+        };
+        window.__phantom.ui.close();
+        await new Promise((r) => setTimeout(r, 200));
+        state.closed = !document.querySelector('.phantom-modal');
+        state.scrollRestored = document.documentElement.style.overflow !== 'hidden';
+        return state;
+    }, phantomId);
+
+    check('the manager opens as a modal without the jellyfin-web patch',
+        !modal.error && modal.open && modal.upgraded && modal.rendered,
+        modal.error || JSON.stringify(modal));
+    check('the modal locks the page behind it and releases it on close',
+        !modal.error && modal.scrollLocked && modal.closed && modal.scrollRestored,
+        modal.error || `locked ${modal.scrollLocked}, closed ${modal.closed}`);
+
+    // Opening onto one item is what the context-menu entry does.
+    const modalForItem = await page.evaluate(async (pid, itemId) => {
+        const { knownServers } = await import('/web/plugin/source.js');
+        const source = knownServers(pid)[0];
+        if (!source) return { error: 'no source server' };
+        await window.__phantom.ui.open({ serverId: source.id, itemId });
+        const deadline = Date.now() + 20000;
+        let manager = null;
+        while (Date.now() < deadline) {
+            manager = document.querySelector('.phantom-modal offline-sync-manager');
+            if (manager && manager.state && (manager.state.asking || manager.state.error)) break;
+            await new Promise((r) => setTimeout(r, 200));
+        }
+        const out = {
+            asked: !!(manager && manager.state && manager.state.asking),
+            askedFor: manager && manager.state && manager.state.asking && manager.state.asking.Id,
+            error: manager && manager.state && manager.state.error,
+            serverSelected: manager && manager.state && manager.state.serverId === source.id
+        };
+        window.__phantom.ui.close();
+        return out;
+    }, phantomId, BURN_ITEM);
+
+    check('the modal can open straight onto one item',
+        !modalForItem.error && modalForItem.serverSelected && modalForItem.askedFor === BURN_ITEM,
+        modalForItem.error || `asked for ${modalForItem.askedFor}`);
+
+    // The patch is optional, so its absence is reported rather than failed.
+    const patched = await page.evaluate(async () => {
+        const btn = [...document.querySelectorAll('button')]
+            .find((b) => /account|user/i.test(b.getAttribute('aria-label') || ''));
+        if (btn) btn.click();
+        await new Promise((r) => setTimeout(r, 800));
+        const entry = [...document.querySelectorAll('[role="menuitem"], li')]
+            .find((e) => e.textContent.trim() === 'Manage Downloads');
+        if (!entry) {
+            document.body.click();
+            return { present: false };
+        }
+        entry.click();
+        await new Promise((r) => setTimeout(r, 2000));
+        const opened = !!document.querySelector('.phantom-modal');
+        window.__phantom.ui.close();
+        return { present: true, opened };
+    });
+    check(patched.present
+        ? 'the patched menu entry opens the manager'
+        : 'the build carries no patch, which is the supported case',
+    patched.present ? patched.opened === true : true,
+    patched.present ? 'patch present' : 'stock jellyfin-web');
+
     // ---- 9. the socket shim ----------------------------------------------
 
     const socket = await page.evaluate(async (itemId) => {
@@ -1428,7 +1511,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         return {
             htmlStatus: htmlRes.status,
             jsStatus: jsRes.status,
-            isModule: js.includes('export default')
+            isModule: /export\s*\{\s*default/.test(js) || js.includes('export default')
         };
     });
     check('the download manager still loads with no network',

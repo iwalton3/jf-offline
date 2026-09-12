@@ -17,18 +17,33 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 DEST="$HERE/../overlay/plugin/vdx"
 
 rm -rf "$DEST"
-mkdir -p "$DEST/ui/selection" "$DEST/ui/data" "$DEST/ui/misc" "$DEST/styles"
-cp -r "$SRC/lib" "$DEST/lib"
+mkdir -p "$DEST/lib" "$DEST/ui/selection" "$DEST/ui/data" "$DEST/ui/misc" "$DEST/styles"
+
+# The pre-built bundles rather than lib/'s 27 source modules: the whole app is
+# precached for offline use, and 27 files is 27 cache entries and 27 requests
+# for the same code. They are copied to lib/ under their own names because that
+# is the path ui/ components import them by, so nothing has to be rewritten.
+for bundle in framework utils windowing overlay gestures; do
+    cp "$SRC/dist/$bundle.js" "$DEST/lib/$bundle.js"
+done
 cp "$SRC/ui/selection/dropdown.js"  "$DEST/ui/selection/"
 cp "$SRC/ui/data/virtual-list.js"   "$DEST/ui/data/"
 cp "$SRC/ui/misc/spinner.js"        "$DEST/ui/misc/"
 cp "$SRC/styles/theme.css"          "$DEST/styles/"
 find "$DEST" -name "*.map" -delete
 
+# The import is RELATIVE, computed per file, because the site may be deployed in
+# a subdirectory (GitHub Pages project sites are) and an absolute /web/... path
+# would only resolve at an origin root.
 patched=0
 for file in $(grep -rl "document\.createElement(" "$DEST" --include="*.js"); do
+    rel="${file#"$DEST"/}"
+    depth=$(printf '%s' "$rel" | tr -cd '/' | wc -c)
+    up=""
+    i=0
+    while [ "$i" -lt "$depth" ]; do up="../$up"; i=$((i + 1)); done
     sed -i 's/document\.createElement(/vdxCreateElement(/g' "$file"
-    sed -i "1i import { vdxCreateElement } from '/web/plugin/vdx-native-dom.js';" "$file"
+    sed -i "1i import { vdxCreateElement } from '${up}../vdx-native-dom.js';" "$file"
     patched=$((patched + 1))
 done
 

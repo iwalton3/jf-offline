@@ -295,9 +295,20 @@
         ['GET', /^\/plugins\/securityinfo$/, () => json({ SupporterKey: '', IsMbSupporter: false })]
     ];
 
+    /**
+     * Strip the deployment's base path, so routes are written as if mounted at
+     * the root whatever directory the site is actually served from.
+     */
+    function relative(pathname) {
+        const base = S.basePath;
+        if (base && pathname.startsWith(base)) return pathname.slice(base.length) || '/';
+        return pathname;
+    }
+
     /** Everything the phantom server owns. Anything else is jellyfin-web's own. */
     function handles(pathname) {
-        return !pathname.startsWith('/web/') || /^\/web\/configurationpages?$/i.test(pathname);
+        const path = relative(pathname);
+        return !path.startsWith('/web/') || /^\/web\/configurationpages?$/i.test(path);
     }
 
     async function dispatch(request, url) {
@@ -305,7 +316,7 @@
         // case of its paths. Handlers therefore receive LOWER-CASED captures; if a
         // capture's case matters downstream, normalise it where it is used rather
         // than assuming the wire spelling survived this line.
-        const path = url.pathname.toLowerCase().replace(/\/+$/, '') || '/';
+        const path = relative(url.pathname).toLowerCase().replace(/\/+$/, '') || '/';
         const ctx = { request, url, params: new Params(url.searchParams) };
 
         for (const [method, pattern, handler] of ROUTES) {

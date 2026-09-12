@@ -80,10 +80,13 @@ if (IS_SERVICE_WORKER) {
 
     // --- app shell -----------------------------------------------------------
 
+    const BASE = self.PS_SCHEMA.basePath;
+    const WEB = BASE + '/web/';
+
     const isNavigation = (request, url) =>
         request.mode === 'navigate'
-        || url.pathname === '/web/'
-        || url.pathname === '/web/index.html';
+        || url.pathname === WEB
+        || url.pathname === WEB + 'index.html';
 
     /**
      * Files the overlay owns, as opposed to jellyfin-web's build output.
@@ -94,20 +97,23 @@ if (IS_SERVICE_WORKER) {
      * module forever — which shows up as an import failing for an export that is
      * plainly there in the file on disk.
      */
-    const isOverlayAsset = (pathname) =>
-        pathname.startsWith('/web/ps/')
-        || pathname.startsWith('/web/plugin/')
-        || pathname === '/web/ps-bootstrap.js'
-        || pathname === '/web/serviceworker.js'
-        || pathname === '/web/config.json'
-        || pathname === '/web/diag.html';
+    const isOverlayAsset = (pathname) => {
+        const path = pathname.startsWith(BASE) ? pathname.slice(BASE.length) : pathname;
+        return path.startsWith('/web/ps/')
+            || path.startsWith('/web/plugin/')
+            || path === '/web/ps-bootstrap.js'
+            || path === '/web/ps-ui.js'
+            || path === '/web/serviceworker.js'
+            || path === '/web/config.json'
+            || path === '/web/diag.html';
+    };
 
     async function appShell(request, url) {
         const cache = await activeCache();
         // Navigations are keyed on the document itself, which is the name the
         // manifest uses, so a precached cache already holds the entry a
         // navigation will look for.
-        const key = isNavigation(request, url) ? '/web/index.html' : url.pathname;
+        const key = isNavigation(request, url) ? WEB + 'index.html' : url.pathname;
 
         if (isNavigation(request, url)) {
             // Network first, so an updated build lands without clearing storage;
@@ -115,7 +121,7 @@ if (IS_SERVICE_WORKER) {
             // The host serves index.html with the bootstrap tags already in it, so
             // there is nothing to rewrite here.
             try {
-                const fresh = await fetch('/web/index.html', { cache: 'no-store' });
+                const fresh = await fetch(WEB + 'index.html', { cache: 'no-store' });
                 if (fresh.ok) {
                     await cache.put(key, fresh.clone());
                     return fresh;
@@ -178,7 +184,7 @@ if (IS_SERVICE_WORKER) {
     async function precacheAppShell() {
         if (precacheRun) return precacheRun;
         precacheRun = (async () => {
-            const manifest = await (await fetch('/web/precache-manifest.json', { cache: 'no-store' })).json();
+            const manifest = await (await fetch(WEB + 'precache-manifest.json', { cache: 'no-store' })).json();
             const target = CACHE_PREFIX + manifest.version;
             const currentName = await activeCacheName();
             const fresh = await caches.open(target);
@@ -191,7 +197,7 @@ if (IS_SERVICE_WORKER) {
                 const previous = await caches.open(currentName);
                 for (const url of manifest.files) {
                     const path = new URL(url, self.location.origin).pathname;
-                    if (isOverlayAsset(path) || path === '/web/index.html') continue;
+                    if (isOverlayAsset(path) || path === WEB + 'index.html') continue;
                     if (await fresh.match(url)) continue;
                     const hit = await previous.match(url);
                     if (hit) await fresh.put(url, hit);
@@ -249,7 +255,7 @@ if (IS_SERVICE_WORKER) {
     }
 
     async function precacheStatus() {
-        const manifest = await (await fetch('/web/precache-manifest.json', { cache: 'no-store' }))
+        const manifest = await (await fetch(WEB + 'precache-manifest.json', { cache: 'no-store' }))
             .json().catch(() => null);
         if (!manifest) {
             // Offline: report what the live cache holds rather than nothing, so the
