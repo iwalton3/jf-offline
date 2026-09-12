@@ -368,8 +368,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
     // The real proof: playback started by the app itself, through its own detail
     // page and its own player, rather than a URL we fetched by hand.
-    async function playThroughApp(itemId, label) {
-        await page.goto(`${APP}/web/#/details?id=${itemId}`, { waitUntil: 'networkidle2', timeout: 45000 });
+    async function playThroughApp(itemId, opts = {}) {
+        // `waitUntil` is a parameter because the offline run uses this too, and
+        // networkidle2 never settles with the network switched off.
+        await page.goto(`${APP}/web/#/details?id=${itemId}`,
+            { waitUntil: opts.waitUntil || 'networkidle2', timeout: 45000 }).catch(() => {});
         await sleep(3500);
         const clicked = await page.evaluate(() => {
             const candidates = [...document.querySelectorAll('button, .button-flat, .cardOverlayButton')]
@@ -2302,9 +2305,42 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
     // Errors raised from here on are about a network that is deliberately gone.
     const beforeOffline = consoleErrors.length;
+
+    // Make the phantom the most recently used server before the network goes.
+    //
+    // Not cosmetic. jellyfin-web sorts saved servers by DateLastAccessed and then
+    // tries ONLY the first one — connectToServers takes servers[0] and never
+    // falls through (`connectionManager.js:434`). So whichever server was used
+    // last decides whether an offline start reaches the library or the "Server
+    // Unavailable" page, and the phantom being reachable does not save it.
+    //
+    // jellyfin-web writes this field itself whenever the app connects to a
+    // server. This suite writes the SOURCE server's credentials by hand, with a
+    // timestamp of now, so without this line the ordering under test would be an
+    // artefact of the fixture rather than anything a person would produce.
+    await page.evaluate((pid) => {
+        const creds = JSON.parse(localStorage.getItem('jellyfin_credentials') || '{}');
+        const phantom = (creds.Servers || []).find((s) => s.Id === pid);
+        if (phantom) phantom.DateLastAccessed = Date.now();
+        localStorage.setItem('jellyfin_credentials', JSON.stringify(creds));
+    }, phantomId);
+
     await page.setOfflineMode(true);
     await page.goto(`${APP}/web/`, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
-    await sleep(3000);
+    await sleep(4000);
+
+    // What the app settled on, rather than what the worker would answer. Every
+    // other check here calls fetch() on a relative URL, which the worker serves
+    // whatever the app believes, so none of them can see the app land on the
+    // connection error page instead of the library.
+    const offlineLanding = await page.evaluate(() => ({
+        errorPage: !!document.querySelector('#connectionErrorPage:not(.hide)'),
+        server: window.ApiClient && window.ApiClient.serverInfo && window.ApiClient.serverInfo()
+            ? window.ApiClient.serverInfo().Name : null
+    }));
+    check('an offline start lands on the phantom, not the connection error page',
+        offlineLanding.errorPage === false,
+        `connected to ${offlineLanding.server}`);
     const offline = await page.evaluate(async () => {
         const boot = !!window.PS_SCHEMA;
         const sys = await fetch('/System/Info/Public').then((r) => r.json()).catch((e) => ({ error: String(e) }));
@@ -2343,6 +2379,29 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     }, direct.id);
     check('media serves with no network', offlineMedia.status === 206 && offlineMedia.bytes === 1024,
         `${offlineMedia.status} ${offlineMedia.bytes} ${offlineMedia.url}`);
+    // The promise the whole project is for. That the bytes are reachable is the
+    // check above; this is jellyfin-web's own player, started from its own detail
+    // page, with the network switched off. Both modes, because direct playback
+    // and hls.js reach the worker by different routes.
+    const pause = () => page.evaluate(() => {
+        const v = document.querySelector('video');
+        if (v) v.pause();
+    });
+    const offlineDirect = await playThroughApp(direct.id, { waitUntil: 'domcontentloaded' });
+    check('jellyfin-web plays a downloaded original with no network',
+        offlineDirect.ok === true,
+        offlineDirect.error || `t=${(offlineDirect.currentTime || 0).toFixed(2)}s`);
+    await pause();
+
+    const offlineHls = await playThroughApp(hls.id, { waitUntil: 'domcontentloaded' });
+    check('and plays a downloaded transcode with no network',
+        offlineHls.ok === true,
+        offlineHls.error || `t=${(offlineHls.currentTime || 0).toFixed(2)}s`);
+    await pause();
+
+    await page.goto(`${APP}/web/`, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+    await sleep(2000);
+
     const offlineRoute = await page.evaluate(async () => {
         // A lazily-loaded chunk for a route this session never opened. Cached on
         // demand it would not be here; precached, it is.
