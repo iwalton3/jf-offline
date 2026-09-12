@@ -37,6 +37,25 @@ NODE_PATH=/working/mrepo-web/tests/node_modules node tools/smoke.js
 HEADFUL=1 ... node tools/smoke.js   # to watch it
 ```
 
+**The suite needs trickplay on the QA server, and a fresh one has none.** Three
+checks are vacuous without it and two of those are the only cover rule D has. On
+a rebuilt server, set it up as the dashboard would:
+
+- `EnableTrickplayImageExtraction` on the **Test Media** library only. It is 88
+  short clips, so generation is minutes rather than hours, and the suite's
+  fixtures live there.
+- `TrickplayOptions.WidthResolutions` `[320, 480, 640]` — more than one, so
+  "keeps exactly one width" is testable.
+- `TrickplayOptions.TileWidth` and `TileHeight` **2**, with `Interval` 5000. The
+  defaults are 10×10, which puts a 30-second clip's six thumbnails in ONE sheet
+  and makes every sheet-coverage assertion pass whatever the code does.
+- Then run the **Generate Trickplay Images** task. It will not redo an item that
+  already has tiles at a width, so changing the tile grid alone regenerates
+  nothing — adding a width is what makes it re-run.
+
+`tools/userdata-probe.py` and `tools/remux-probe.py` need no setup beyond the
+server itself.
+
 ## Things that have already cost a day
 
 - **`overlay/serviceworker.js` is also loaded as an ordinary page script.**
