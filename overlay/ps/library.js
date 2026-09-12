@@ -345,9 +345,16 @@
             return chain;
         };
 
+        const ids = new Set(p.list('ids').map((id) => id.toLowerCase()));
+
         let candidates = rows;
 
-        if (parentId) {
+        if (ids.size) {
+            // Named items, wherever they sit. The app's new-item notification asks
+            // this way after every LibraryChanged, and ignoring it answered with
+            // whichever held films sorted first.
+            candidates = rows.filter((r) => ids.has(String(r.id).toLowerCase()));
+        } else if (parentId) {
             const view = VIEW_BY_ID.get(parentId);
             if (view) {
                 candidates = recursive
@@ -390,6 +397,8 @@
         if (filters.includes('isplayed')) dtos = dtos.filter((d) => d.UserData && d.UserData.Played);
         if (filters.includes('isunplayed')) dtos = dtos.filter((d) => !(d.UserData && d.UserData.Played));
         if (filters.includes('isresumable')) dtos = dtos.filter((d) => d.UserData && d.UserData.PlaybackPositionTicks > 0);
+        if (filters.includes('isfolder')) dtos = dtos.filter((d) => d.IsFolder);
+        if (filters.includes('isnotfolder')) dtos = dtos.filter((d) => !d.IsFolder);
 
         const sortBy = p.list('sortBy');
         const descending = String(p.get('sortOrder', 'Ascending')).toLowerCase() === 'descending';
