@@ -1,18 +1,100 @@
-# Phantom Jellyfin Server
+# Offline Jellyfin
 
-A service worker that impersonates a Jellyfin server well enough that an
+Take your Jellyfin library with you. This is a web app that downloads shows and
+movies from the Jellyfin servers you already use, keeps them inside your browser,
+and then plays them back through the ordinary Jellyfin web interface with no
+network at all. On a plane, on a train, on hotel wifi that cannot be trusted with
+a video stream: the app looks and works the way it always does, and the library
+it shows is the part you brought with you.
+
+Nothing is installed and nothing runs on your server beyond the downloads
+themselves. Your logins stay in your browser, and so do the files.
+
+- **Try it:** <https://iwalton3.github.io/jf-offline/>
+- **Host it yourself:** [jf-offline-bundle.zip](https://nightly.link/iwalton3/jf-offline/workflows/pages/main/jf-offline-bundle.zip)
+  — the whole site as static files, built by CI from the latest commit. Unzip it
+  anywhere a web server can reach, or drop it in place of your own jellyfin-web.
+
+> This is a v0 spike. It works, and it is not finished. See
+> `SCOPE.md` for what it deliberately does not do.
+
+## Using it
+
+1. **Open the app and sign in as *Offline*,** which takes no password. That is
+   the phantom server, and it starts out with an empty library. It lives
+   entirely in your browser.
+2. **Add your real server** from the server-selection screen and sign in to it as
+   usual. Both servers now sit side by side in the list, and you can move between
+   them whenever you like.
+3. **Download something.** Use **Sync Offline** in any show, season, episode or
+   movie's context menu, or open **Manage Downloads** from the user menu to pick
+   from a list. Downloading a series asks, once, how to choose audio and
+   subtitle tracks across its episodes, and lets you correct any episode where
+   the answer came out wrong.
+4. **Go offline.** Switch to the *Offline* server and play. Resume positions and
+   watched state are kept locally while you are away. They are not sent back to
+   your server yet.
+
+Downloads are removed from the same manager, and it shows how much space the
+library is using.
+
+**Your server has to allow it.** Downloading is gated on the *Allow media
+downloads* permission on your Jellyfin account, and anything that needs a
+conversion is gated on the transcoding permission as well. If an administrator
+has not granted those, the manager says so rather than trying.
+
+### What runs it
+
+Chrome and Firefox, on desktop and on Android. iOS is not supported and is not
+tested. Give the app permission to store data when the browser asks, or it may
+evict the library to reclaim space.
+
+The client is about 55 MB and is held offline in full, in the background, the
+first time you visit. The manager shows that progress; wait for it to finish
+before your first flight.
+
+## How it works
+
+A service worker impersonates a Jellyfin server well enough that an
 **unmodified, unrecompiled jellyfin-web** browses and plays a library held
-entirely in the browser.
+entirely in the browser. Downloads are pulled from the real servers you are
+signed in to, stored in the origin private file system, and served back over
+ranged HTTP the app cannot tell from a server on the network.
 
-Downloads are pulled from the real Jellyfin servers the user is already signed in
-to, stored in the origin private file system, and served back over ranged HTTP
-that the app cannot tell from a server on the network.
+```
+┌─ your browser ──────────────────────────────────────────────────────┐
+│                                                                     │
+│   jellyfin-web ──── /Items, /PlaybackInfo, /Videos ───►  service    │
+│   (stock build) ◄── JSON, and media as ranged 206s ────  worker     │
+│                                                            │        │
+│                                                      reads │        │
+│                                                            ▼        │
+│   download manager ──────────── writes ──────────► IndexedDB (meta) │
+│   (vdx-web, in the page)                           OPFS  (the bytes)│
+│            │                                                        │
+└────────────┼────────────────────────────────────────────────────────┘
+             │ HTTPS, with your own Jellyfin login
+             ▼
+     your real Jellyfin server(s)
+```
 
-This is a v0 spike. See `SCOPE.md` for what it deliberately does not do.
+**No patch to jellyfin-web is required**, and that is the point of the design:
+the overlay meets the app at seams it already has, so it does not have to follow
+jellyfin-web's churn. The app finds the phantom server by probing its own origin,
+registers the worker itself, and loads the download manager the same way it loads
+any plugin's settings page. Everything works against a build straight off
+jellyfin-web's own release branch.
+
+There is [one optional
+patch](https://github.com/iwalton3/jf-offline/blob/main/patches/0001-offline-sync-entry-points.patch),
+which the demo applies: thirty-seven lines that add **Manage Downloads** to the
+user menu and **Sync Offline** to item context menus, each guarded on the overlay
+being present. Without it the manager is still reachable through Dashboard →
+Offline Sync, and every other feature is unchanged.
 
 ## The demo
 
-`https://iwalton3.github.io/jf-offline/` — built and deployed by
+<https://iwalton3.github.io/jf-offline/> — built and deployed by
 `.github/workflows/pages.yml` on every push, from jellyfin-web's own source plus
 this overlay. Nothing is committed pre-built.
 
@@ -24,7 +106,10 @@ assembled site from a plain static host and drives it in a browser
 (`tools/verify-site.js`) before deploying, since "the files are present" and "the
 app boots and finds its server" are different claims.
 
-## Running it
+The same job packages the tree a second time at an origin root and uploads it as
+`jf-offline-bundle.zip`, which is what the self-hosting link above points at.
+
+## Running it locally
 
 ```sh
 # once: build jellyfin-web (any recent checkout)
@@ -34,9 +119,8 @@ cd ~/Desktop/jellyfin-web && npm run build:production
 python3 serve.py                      # http://127.0.0.1:8099/web/
 ```
 
-Open the app, sign in as **Offline** (no password), then add your real server from
-the server-selection screen and sign in to it. Dashboard → Offline Sync is the
-download manager.
+Then follow *Using it* above. On an unpatched build the manager is at
+Dashboard → Offline Sync rather than in the menus.
 
 ## The whole change to jellyfin-web
 

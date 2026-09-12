@@ -192,9 +192,17 @@ HEADFUL=1 ... node tools/smoke.js   # to watch it
   an item and may end by calling `run()`, which takes the lock — holding it across
   the inspection meant `run()` was refused and the download silently never began,
   for every item with nothing to ask about. Checking uses `task()`.
-- **The modal lives in a shadow root.** jellyfin-web's stylesheets are global and
-  reached into it: on a phone the close button was pushed outside the panel.
-  `window.__phantom.ui.element()` is how anything reaches the manager inside it.
+- **The modal is defended by hand, not by a shadow root.** A shadow root is the
+  obvious isolation for a panel dropped into someone else's document, and it was
+  tried and reverted: vdx-web's styling reaches the component from the document
+  and a boundary around it breaks that. The manager is its own shadow-DOM
+  component anyway, so only the chrome in `ps-ui.js` is exposed — every layout
+  property there is `!important`, every chrome element is reset rather than
+  assumed, the root sets `font` so `em` is ours, and the panel sizes in
+  percentages rather than `vw`/`vh`. A check in `tools/smoke.js` drops a hostile
+  stylesheet on the page and measures the close button: against chrome that only
+  styles itself it lands hundreds of pixels outside a phone-width panel. That is
+  the test, because the phone report itself does not reproduce in puppeteer.
 
 ## The schema is shaped for features that do not exist yet
 

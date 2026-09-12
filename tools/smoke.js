@@ -1467,6 +1467,53 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         !modal.error && modal.scrollLocked && modal.closed && modal.scrollRestored,
         modal.error || `locked ${modal.scrollLocked}, closed ${modal.closed}`);
 
+    // The chrome is in jellyfin-web's document rather than a shadow root, so
+    // the only thing keeping its stylesheets out of the modal is that every
+    // layout property in ps-ui.js is !important and every chrome element is
+    // reset. This drops a deliberately hostile stylesheet on the page and
+    // measures: against chrome that merely styles itself, the close button
+    // lands hundreds of pixels outside a phone-width panel.
+    const HOSTILE = `
+        button { padding: 2em 3em !important; font-size: 2em !important;
+                 margin: 1em !important; min-width: 12em !important; flex: 1 1 auto !important; }
+        h2 { font-size: 2.5em !important; margin: 1em !important;
+             flex: 3 1 auto !important; white-space: nowrap !important; }
+        div { box-sizing: content-box !important; }
+        html { font-size: 27px; }`;
+
+    await page.setViewport({ width: 412, height: 915 });
+    const hostile = await page.evaluate(async (css) => {
+        const sheet = document.createElement('style');
+        sheet.textContent = css;
+        document.head.appendChild(sheet);
+        await window.__phantom.ui.open();
+        await new Promise((r) => setTimeout(r, 1000));
+        const panel = document.querySelector('[data-phantom-modal] .phantom-modal-panel');
+        const close = document.querySelector('[data-phantom-modal] .phantom-modal-close');
+        const out = panel && close ? (() => {
+            const p = panel.getBoundingClientRect();
+            const c = close.getBoundingClientRect();
+            return {
+                // Half a pixel of slack for subpixel layout; a real escape is hundreds.
+                insidePanel: c.right <= p.right + 0.5 && c.left >= p.left - 0.5,
+                insideViewport: c.right <= window.innerWidth + 0.5 && c.left >= -0.5,
+                visible: c.width > 0 && c.height > 0,
+                panelFits: p.width <= window.innerWidth + 0.5,
+                geometry: `close ${Math.round(c.left)}-${Math.round(c.right)}, `
+                    + `panel ${Math.round(p.left)}-${Math.round(p.right)}, view ${window.innerWidth}`
+            };
+        })() : { error: 'modal did not open' };
+        window.__phantom.ui.close();
+        sheet.remove();
+        return out;
+    }, HOSTILE);
+    await page.setViewport({ width: 1400, height: 1000 });
+
+    check('the modal chrome holds against a hostile page stylesheet',
+        !hostile.error && hostile.visible && hostile.insidePanel
+        && hostile.insideViewport && hostile.panelFits,
+        hostile.error || hostile.geometry);
+
     // Opening onto one item is what the context-menu entry does.
     const modalForItem = await page.evaluate(async (pid, itemId) => {
         const { knownServers } = await import('/web/plugin/source.js');
