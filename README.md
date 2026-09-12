@@ -1,59 +1,43 @@
-# Offline Jellyfin
+# Experimental Offline Sync for Jellyfin Web
 
-Take your Jellyfin library with you. This is a web app that downloads shows and
-movies from the Jellyfin servers you already use, keeps them inside your browser,
-and then plays them back through the ordinary Jellyfin web interface with no
-network at all. On a plane, on a train, on hotel wifi that cannot be trusted with
-a video stream: the app looks and works the way it always does, and the library
-it shows is the part you brought with you.
+This is an experimental Jellyfin-Web build with Offline Sync added.
 
-Nothing is installed and nothing runs on your server beyond the downloads
-themselves. Your logins stay in your browser, and so do the files.
+![Screenshot](https://raw.githubusercontent.com/iwalton3/mpv-shim-misc-docs/refs/heads/master/images/jf-offline.png)
 
-- **Try it:** <https://iwalton3.github.io/jf-offline/>
-- **Host it yourself:** [jf-offline-bundle.zip](https://nightly.link/iwalton3/jf-offline/workflows/pages/main/jf-offline-bundle.zip)
-  — the whole site as static files, built by CI from the latest commit. Unzip it
-  anywhere a web server can reach, or drop it in place of your own jellyfin-web.
+[Try it out here.](https://iwalton3.github.io/jf-offline/) or [Download](https://nightly.link/iwalton3/jf-offline/workflows/pages/main/jf-offline-bundle.zip)
 
-> This is a v0 spike. It works, and it is not finished. See
-> `SCOPE.md` for what it deliberately does not do.
+Quick start:
+- To download files, use the "Sync Offline" option on media items.
+- To manage downloads, use the "Manage Downloads" user menu option.
+- To switch to the offline catalog, use the "Select Server" user menu option.
 
-## Using it
-
-1. **Open the app and sign in as *Offline*,** which takes no password. That is
-   the phantom server, and it starts out with an empty library. It lives
-   entirely in your browser.
-2. **Add your real server** from the server-selection screen and sign in to it as
-   usual. Both servers now sit side by side in the list, and you can move between
-   them whenever you like.
-3. **Download something.** Use **Sync Offline** in any show, season, episode or
-   movie's context menu, or open **Manage Downloads** from the user menu to pick
-   from a list. Downloading a series asks, once, how to choose audio and
-   subtitle tracks across its episodes, and lets you correct any episode where
-   the answer came out wrong.
-4. **Go offline.** Switch to the *Offline* server and play. Resume positions and
-   watched state are kept locally while you are away. They are not sent back to
-   your server yet.
-
-Downloads are removed from the same manager, and it shows how much space the
-library is using.
-
-**Your server has to allow it.** Downloading is gated on the *Allow media
-downloads* permission on your Jellyfin account, and anything that needs a
-conversion is gated on the transcoding permission as well. If an administrator
-has not granted those, the manager says so rather than trying.
-
-### What runs it
-
-Chrome and Firefox, on desktop and on Android. iOS is not supported and is not
-tested. Give the app permission to store data when the browser asks, or it may
-evict the library to reclaim space.
-
-The client is about 55 MB and is held offline in full, in the background, the
-first time you visit. The manager shows that progress; wait for it to finish
-before your first flight.
+Features:
+- Works on Google Chrome and Firefox, both on Desktop and Android
+- Full "Airplane Mode" offline support.
+- Simulates a Jellyfin server locally using an offline service worker
+- Actual working subtitle/audio track support
+  - Can transcode media when syncing if needed
+  - Allows selecting the desired audio track at download time
+  - Burns in subtitles not supported at download time
+  - Downloads metadata, trickplay, and subtitle tracks
+  - Can deal with inconsistent subtitle/audio tracks at download time
+- Search the local offline library.
+- Can work against an unmodified jellyfin-web by replacing two files and adding a folder.
+  - To use without patching jellyfin-web, go to the Offline Sync plugin on the Dashboard of the "Offline Library" server.
+  - Optional patch adds "Manage Downloads" to user menu and "Sync Offline" to item menus.
+- Developed using AI.
 
 ## How it works
+
+In short, this repo adds a service worker to jellyfin-web that simulates an entire Jellyfin server and
+also caches the jellyfin-web app offline so it will work in airplane mode. The management UI is all
+separate from jellyfin-web and works as a fake server plugin page and also can be accessed via two
+very [minimal patches](https://github.com/iwalton3/jf-offline/blob/main/patches/0001-offline-sync-entry-points.patch)
+to jellyfin-web to make it less annoying to use. This was developed using Claude, the part that made it practical was
+that I already had an automatically generated [test library and QA server](https://github.com/iwalton3/stdjflib)
+Claude could rapidly build against.
+
+Reader note: The rest of this document was authored by Claude if you are interested in the details.
 
 A service worker impersonates a Jellyfin server well enough that an
 **unmodified, unrecompiled jellyfin-web** browses and plays a library held
