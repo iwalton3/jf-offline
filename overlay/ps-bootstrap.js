@@ -28,6 +28,7 @@
 
     const NativeWebSocket = g.WebSocket;
     const live = new Set();
+    let lastLibraryChange = 0;
 
     const isPhantomSocket = (url) => {
         try {
@@ -274,7 +275,12 @@
         opfs: g.PS_OPFS,
         socketsOpen: () => live.size,
         // `change` crosses postMessage, so it must be plain: a vdx Proxy does not clone.
-        libraryChanged: (change) => tellWorker('library-changed', { change }),
+        libraryChanged: (change) => {
+            lastLibraryChange = Date.now();
+            return tellWorker('library-changed', { change });
+        },
+        // Read by ps-ui.js to decide whether closing the manager reloads the page.
+        lastLibraryChange: () => lastLibraryChange,
         precache,
         onPrecache: (fn) => {
             precache.listeners.add(fn);

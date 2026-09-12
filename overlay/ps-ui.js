@@ -15,6 +15,17 @@
     const TAG = 'offline-sync-manager';
 
     let overlay = null;
+    let openedAt = 0;
+    let reloadTimer = null;
+    let reloadOwed = false;
+
+    /* A person closing the manager after a download or a removal reloads the page.
+     * The LibraryChanged push and the cache clear in ps-bootstrap.js cannot redraw
+     * a page already on screen: the home page's library row is rebuilt only on
+     * navigation. The reload waits until the change is this old, because
+     * jellyfin-web persists its query cache at most once a second, and a reload
+     * before that restores the copy from before the change. */
+    const RELOAD_AFTER_MS = 1500;
 
     /**
      * The manager module registers the element as a side effect of loading.
@@ -147,10 +158,40 @@
         document.removeEventListener('keydown', onKeyDown, true);
     }
 
+    /**
+     * Close as a person does: the Close button, the backdrop or Escape. close()
+     * itself never reloads, because open() and the suite call it too.
+     *
+     * Only while the app is on the offline library: from any other server the
+     * phantom's pages are reached by switching, which is a navigation and already
+     * refreshes, so a debt owed from earlier is dropped too.
+     *
+     * Not while a download runs, or while an item is being checked, which can end
+     * in one starting: downloads live in this page and a reload kills them.
+     */
+    function dismiss() {
+        const manager = overlay && overlay.querySelector(TAG);
+        const state = manager && manager.state;
+        const downloading = !!(state && (state.busy || state.inspecting));
+        const changedAt = g.__phantom.lastLibraryChange ? g.__phantom.lastLibraryChange() : 0;
+        const onOfflineLibrary = !!(g.ApiClient && g.PS_SCHEMA
+            && g.ApiClient.serverId() === g.PS_SCHEMA.ID.SERVER);
+        close();
+        if (!onOfflineLibrary) {
+            reloadOwed = false;
+            return;
+        }
+        if (changedAt <= openedAt) return;
+        reloadOwed = true;
+        if (downloading) return;
+        reloadTimer = setTimeout(() => g.location.reload(),
+            Math.max(0, changedAt + RELOAD_AFTER_MS - Date.now()));
+    }
+
     function onKeyDown(event) {
         if (event.key === 'Escape') {
             event.stopPropagation();
-            close();
+            dismiss();
         }
     }
 
@@ -164,14 +205,20 @@
     async function open(options = {}) {
         await loadManager();
         if (overlay) close();
+        // A reload still pending, or skipped for a running download, is owed
+        // rather than forgotten: keep the old mark so the next close delivers it.
+        // Only a close creates that debt. A change made elsewhere, such as on the
+        // Offline Sync page, was followed by a navigation that already refreshed.
+        clearTimeout(reloadTimer);
+        if (!reloadOwed) openedAt = Date.now();
 
         overlay = build();
         document.body.appendChild(overlay);
         // The page behind must not scroll under a full-height panel.
         document.documentElement.style.overflow = 'hidden';
 
-        overlay.querySelector('.phantom-modal-close').addEventListener('click', close);
-        overlay.querySelector('.phantom-modal-backdrop').addEventListener('click', close);
+        overlay.querySelector('.phantom-modal-close').addEventListener('click', dismiss);
+        overlay.querySelector('.phantom-modal-backdrop').addEventListener('click', dismiss);
         document.addEventListener('keydown', onKeyDown, true);
 
         const manager = overlay.querySelector(TAG);
