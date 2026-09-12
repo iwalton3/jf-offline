@@ -37,6 +37,12 @@ const REENCODE_ITEM = process.env.JF_REENCODE_ITEM || '0a7fa7476a1ee92a53e895d46
 const MULTI_SEASON_SERIES = process.env.JF_SERIES || '2f9ea3e079631ea97fae6ebadb569063';
 // One season, one episode: cheap to hold so later checks have a real series.
 const SMALL_SERIES = process.env.JF_SMALL_SERIES || '5b12d67700af1f19b8764804c7788343';
+// Two trickplay sheets, one media source, and used by nothing else, so a tile
+// fetch can be failed part way through without disturbing another check.
+const PARTIAL_TRICKPLAY_ITEM = process.env.JF_PARTIAL_TP_ITEM || 'c36e4717f55e81c0fc64269a5fe83ca8';
+// Three media sources on one episode. The downloader keeps one, and the stored
+// DTO must not go on offering the other two.
+const MULTI_VERSION_ITEM = process.env.JF_MULTIVERSION_ITEM || '8067b51b1997c74ed5be368b49aab7e4';
 // Six episodes of 73 KB in one real season folder. Multi-episode matters: a
 // parent entry copied from its child is indistinguishable from a correct one
 // when the parent has exactly one child.
@@ -1387,6 +1393,142 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     check('removing a download takes its artwork with it',
         !removalSweep.error && removalSweep.after === false && removalSweep.media === false,
         removalSweep.error || `image left ${removalSweep.after}, media left ${removalSweep.media}`);
+
+    // ---- 6g. a stored DTO describes the copy ------------------------------
+    //
+    // Scoped to the fields that describe the FILE. Series and season rows
+    // deliberately keep source identity, names and hierarchy for offline
+    // browsing, and there is nothing on disk for them to describe.
+    //
+    // Which fields are in the rule was decided by reading the consumer in the
+    // read-only jellyfin-web checkout rather than by symmetry:
+    //   MediaSources  -> itemDetails renders a Version selector from it, and
+    //                    defaults to MediaSources[0], which need not be the one
+    //                    that was downloaded.
+    //   Trickplay     -> the video OSD reads Width, Height, Interval, TileWidth
+    //                    and TileHeight, and computes the sheet index from the
+    //                    scrub position. It never reads ThumbnailCount, so the
+    //                    bound that matters is the runtime, not the count.
+    const storedDto = await page.evaluate(async (pid, multiId, tpId) => {
+        const { knownServers, SourceServer } = await import('/web/plugin/source.js');
+        const { downloadItem, listDownloads } = await import('/web/plugin/downloader.js');
+        const server = new SourceServer(knownServers(pid)[0]);
+
+        const sourceMulti = await server.item(multiId);
+        const row = await downloadItem(server, sourceMulti, {});
+        const served = await (await fetch('/Items/' + multiId)).json();
+        // What the player will actually be given, so the two are compared with
+        // each other rather than against an id spelled out here.
+        const playback = await (await fetch('/Items/' + multiId + '/PlaybackInfo', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ DeviceProfile: {} })
+        })).json();
+
+        const tp = await (await fetch('/Items/' + tpId)).json();
+        const tpRow = (await listDownloads()).find((r) => r.itemId === tpId);
+        const byWidth = tpRow && ((tp.Trickplay || {})[tpRow.sourceId] || {});
+        const widths = Object.keys(byWidth || {});
+        const info = widths.length ? byWidth[widths[0]] : null;
+
+        // The index the OSD would ask for at the very end of the file, computed
+        // the way it computes it. Counted in SHEETS; ThumbnailCount counts
+        // individual thumbnails, and comparing the two compares different units.
+        let missing = null;
+        if (info) {
+            const lastTile = Math.floor((tp.RunTimeTicks / 10000) / info.Interval);
+            const maxIndex = Math.floor(lastTile / (info.TileWidth * info.TileHeight));
+            missing = [];
+            for (let i = 0; i <= maxIndex; i++) {
+                const held = await window.PS_OPFS.file(window.PS_SCHEMA.paths.trickplayTile(
+                    tpRow.srv, tpId, tpRow.sourceId, Number(widths[0]), i));
+                if (!held) missing.push(i);
+            }
+        }
+        return {
+            sourceSources: (sourceMulti.MediaSources || []).length,
+            servedSources: (served.MediaSources || []).map((m) => m.Id),
+            playbackSources: (playback.MediaSources || []).map((m) => m.Id),
+            sourceWidths: Object.keys((sourceMulti.Trickplay || {})[row.sourceId] || {}).length,
+            widths,
+            info,
+            missing
+        };
+    }, phantomId, MULTI_VERSION_ITEM, SUBTITLE_ITEM);
+
+    check('the multi-version fixture really has more than one source',
+        storedDto.sourceSources > 1, `${storedDto.sourceSources} on the source server`);
+    check('a served item offers exactly the version the player will be given',
+        storedDto.servedSources.length === 1
+            && storedDto.servedSources.join() === storedDto.playbackSources.join(),
+        `item offers ${JSON.stringify(storedDto.servedSources)}, `
+        + `PlaybackInfo offers ${JSON.stringify(storedDto.playbackSources)}`);
+
+    check('the trickplay fixture really has trickplay',
+        storedDto.widths.length > 0 && !!storedDto.info,
+        `${storedDto.widths.length} width(s) held`);
+    check('a stored item offers only the trickplay width that was downloaded',
+        storedDto.widths.length === 1, storedDto.widths.join(','));
+    check('every trickplay sheet the player can ask for is held',
+        !!storedDto.missing && storedDto.missing.length === 0,
+        storedDto.missing ? `missing sheets ${JSON.stringify(storedDto.missing)}` : 'no descriptor');
+
+    // A tile fetch that fails part way is the only way the descriptor and the
+    // disk can disagree, and no server state produces it — the loop breaks on
+    // the first failure, so the failure has to be injected. Driven through
+    // downloadItem rather than downloadTrickplay so the store write, the DTO
+    // prune and the row all see what really happened.
+    const partialTrickplay = await page.evaluate(async (pid, itemId) => {
+        const { knownServers, SourceServer } = await import('/web/plugin/source.js');
+        const { downloadItem, removeDownload, listDownloads } = await import('/web/plugin/downloader.js');
+        const server = new SourceServer(knownServers(pid)[0]);
+        const dto = await server.item(itemId);
+
+        const sourceId = (dto.MediaSources || [{}])[0].Id;
+        const byWidth = (dto.Trickplay || {})[sourceId] || {};
+        const widths = Object.keys(byWidth).map(Number).filter(Number.isFinite);
+        if (!widths.length) return { error: 'fixture has no trickplay' };
+        const width = Math.max(...widths);
+        const info = byWidth[width];
+        const sheets = Math.ceil(info.ThumbnailCount / (info.TileWidth * info.TileHeight));
+
+        let asked = 0;
+        const real = server.fetchSignal.bind(server);
+        server.fetchSignal = (url, signal) => {
+            if (/\/Trickplay\//i.test(String(url)) && asked++ >= 1) {
+                return Promise.reject(new Error('injected tile failure'));
+            }
+            return real(url, signal);
+        };
+
+        const row = await downloadItem(server, dto, {});
+        const served = await (await fetch('/Items/' + itemId)).json();
+        const held = [];
+        for (let i = 0; i < sheets; i++) {
+            held.push(!!(await window.PS_OPFS.file(window.PS_SCHEMA.paths
+                .trickplayTile(row.srv, itemId, row.sourceId, width, i))));
+        }
+        const out = {
+            sheets,
+            asked,
+            held,
+            descriptor: served.Trickplay && Object.keys(served.Trickplay).length
+                ? served.Trickplay : null
+        };
+        for (const r of (await listDownloads()).filter((r) => r.itemId === itemId)) {
+            await removeDownload(r);
+        }
+        return out;
+    }, phantomId, PARTIAL_TRICKPLAY_ITEM);
+
+    check('the partial-trickplay fixture needs more than one sheet',
+        !partialTrickplay.error && partialTrickplay.sheets > 1 && partialTrickplay.asked > 1,
+        partialTrickplay.error || `${partialTrickplay.sheets} sheets, ${partialTrickplay.asked} asked for`);
+    check('a trickplay download that lost a sheet stores no descriptor',
+        !partialTrickplay.error && partialTrickplay.descriptor === null,
+        JSON.stringify(partialTrickplay.descriptor));
+    check('and keeps none of the sheets that did arrive',
+        !partialTrickplay.error && (partialTrickplay.held || []).every((h) => !h),
+        JSON.stringify(partialTrickplay.held));
 
     // ---- 7. play state ----------------------------------------------------
 

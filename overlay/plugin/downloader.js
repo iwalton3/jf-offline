@@ -412,6 +412,19 @@ async function downloadTrickplay(server, dto, mediaSource, signal) {
             break;
         }
     }
+    // All or nothing, and the reason is in the consumer: the video OSD computes
+    // which sheet to ask for from the scrub position, the interval and the tile
+    // grid, and never reads ThumbnailCount at all
+    // (apps/legacy/controllers/playback/video/index.js:1504-1517 in the
+    // read-only reference checkout). So there is no descriptor that honestly
+    // says "the first half" — a partial set answers the early sheets and 404s
+    // every later one, which is scrubbing thumbnails vanishing part way through
+    // a film with nothing anywhere to say why. The tile loop breaks on the first
+    // failure, so this is the normal shape of a partial set, not a rare one.
+    if (stored < tiles) {
+        await OPFS().removeDir(S().paths.trickplayDir(server.id, dto.Id, mediaSource.Id, width));
+        return null;
+    }
     return stored ? Object.assign({ width, tiles: stored }, info) : null;
 }
 

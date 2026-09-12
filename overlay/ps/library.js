@@ -34,8 +34,11 @@
      * nothing — instead of only on the path somebody remembered to clean up.
      */
     async function loadAll() {
-        const [all, ud] = await Promise.all([DB.all('items'), DB.all('userdata')]);
+        const [all, ud, downloads] = await Promise.all([
+            DB.all('items'), DB.all('userdata'), DB.all('downloads')
+        ]);
         const udMap = new Map(ud.map((u) => [u.srv + ':' + u.itemId, u]));
+        const dlMap = new Map(downloads.map((d) => [d.srv + ':' + d.itemId, d]));
 
         // Played is counted here beside the total, because a container's counts
         // and its user data are the same question asked twice and answering them
@@ -61,6 +64,9 @@
             return (heldCount.get(row.id) || 0) > 0;
         });
         for (const row of rows) {
+            // Hung on the row rather than threaded through present(), which has
+            // thirteen call sites; `held` above arrived the same way.
+            row.download = dlMap.get(row.srv + ':' + row.id) || null;
             if (!heldCount.has(row.id)) continue;
             row.held = { total: heldCount.get(row.id), played: playedCount.get(row.id) || 0 };
         }
@@ -166,6 +172,27 @@
         if (row.held) {
             dto.ChildCount = row.held.total;
             dto.RecursiveItemCount = row.held.total;
+        }
+
+        // The versions and the tracks describe the copy, because they came off
+        // the source server describing the file it has. jellyfin-web's detail
+        // page builds a Version selector straight from this list and defaults to
+        // its first entry, so a multi-version item downloaded here offered two
+        // versions that are not on disk and pre-selected one of them
+        // (itemDetails/index.js:197-230 in the read-only reference checkout).
+        //
+        // Substituted from the download row rather than pruned, and by the same
+        // definition PlaybackInfo answers with, so the page and the player cannot
+        // describe one file two ways. Removed outright for a Series or a Season:
+        // there is no copy on disk for them to describe, and a real server sends
+        // no MediaSources for a folder either.
+        if (row.download) {
+            const source = g.PS_PLAYBACK.mediaSourceFor(row.download, row.dto);
+            dto.MediaSources = [source];
+            dto.MediaStreams = source.MediaStreams;
+        } else {
+            delete dto.MediaSources;
+            delete dto.MediaStreams;
         }
         return dto;
     }

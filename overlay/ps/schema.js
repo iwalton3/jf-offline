@@ -182,6 +182,8 @@
             ['media', srv, itemId, sourceId, 'subs', index + '.' + (format || 'vtt')],
         attachment: (srv, itemId, sourceId, index) =>
             ['media', srv, itemId, sourceId, 'attachments', String(index)],
+        trickplayDir: (srv, itemId, sourceId, width) =>
+            ['media', srv, itemId, sourceId, 'trickplay', String(width)],
         trickplayTile: (srv, itemId, sourceId, width, index) =>
             ['media', srv, itemId, sourceId, 'trickplay', String(width), index + '.jpg'],
         // Images hang off the item, not off a media source: a multi-version item

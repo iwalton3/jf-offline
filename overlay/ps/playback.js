@@ -135,20 +135,28 @@
         }));
 
         if (dl.mode === S.DOWNLOAD_MODE.HLS) {
-            return Object.assign(base, {
+            const hls = Object.assign(base, {
                 Container: 'ts',
                 SupportsDirectPlay: false,
                 SupportsDirectStream: false,
                 SupportsTranscoding: true,
                 TranscodingSubProtocol: 'hls',
-                TranscodingContainer: 'ts',
-                // Points straight at the stored variant playlist. hls.js accepts a
-                // media playlist without a master, and we have nothing to choose
-                // between: a download is one rendition by definition.
-                TranscodingUrl: '/videos/' + dl.itemId + '/main.m3u8'
-                    + '?MediaSourceId=' + dl.itemId
-                    + '&PlaySessionId=' + playSessionId
+                TranscodingContainer: 'ts'
             });
+            // Only when there is a session to name. This same description is what
+            // the library serves in an item DTO, where no play session exists yet
+            // and inventing one would put a fabricated id in the catalogue; a URL
+            // to actually fetch comes from PlaybackInfo, which has one.
+            //
+            // Points straight at the stored variant playlist. hls.js accepts a
+            // media playlist without a master, and we have nothing to choose
+            // between: a download is one rendition by definition.
+            if (playSessionId) {
+                hls.TranscodingUrl = '/videos/' + dl.itemId + '/main.m3u8'
+                    + '?MediaSourceId=' + dl.itemId
+                    + '&PlaySessionId=' + playSessionId;
+            }
+            return hls;
         }
 
         return Object.assign(base, {
@@ -370,6 +378,7 @@
 
     g.PS_PLAYBACK = {
         playbackInfo, stream, hlsPlaylist, hlsSegment, subtitle, attachment, trickplayTile,
+        mediaSourceFor,
         reportProgress, setPlayed, setFavorite,
         findDownload, findItem
     };
