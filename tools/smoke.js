@@ -58,6 +58,12 @@ const check = (name, ok, detail) => {
     results.push({ name, ok: !!ok, detail });
     console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`);
 };
+// Loud on purpose. A check that quietly does nothing when its fixture is absent
+// is the exact shape of the defect this suite has been repaired for twice.
+const skip = (name, why) => {
+    results.push({ name, ok: true, skipped: true, detail: why });
+    console.log(`SKIP  ${name}  — ${why}`);
+};
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 (async () => {
@@ -2301,6 +2307,138 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         `UnplayedItemCount ${parents.seriesUserData && parents.seriesUserData.UnplayedItemCount}`
         + ` over ${parents.heldCount} held, source has ${parents.sourceCount}`);
 
+    // ---- 9b. a second source server ---------------------------------------
+    //
+    // SCOPE.md offers downloading "from any server jellyfin-web is signed in to",
+    // and until now every check used knownServers(pid)[0]. The items store is
+    // keyed [srv, id] and the downloads store [srv, itemId, sourceId] precisely
+    // so two servers can be held at once, and nothing defended that decision.
+    //
+    // The second server is a container of the same library, so the content is the
+    // same and the item ids are not: Jellyfin derives an id from the file's path
+    // and the container mounts the library somewhere else. Same-id-two-servers is
+    // therefore NOT what this exercises, and the code that would meet it says so
+    // for itself -- findItem() and image() take the first match by design.
+    const SOURCE2 = process.env.JF_BASE2 || 'http://127.0.0.1:8097';
+    const second = await page.evaluate(async (base, user, pass) => {
+        const probe = await fetch(base + '/System/Info/Public').then((r) => r.json()).catch(() => null);
+        if (!probe) return { absent: true };
+        const auth = await (await fetch(base + '/Users/AuthenticateByName', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                Authorization: 'MediaBrowser Client="Offline Sync", Device="Browser", DeviceId="phantom-downloader", Version="0.1.0"'
+            },
+            body: JSON.stringify({ Username: user, Pw: pass })
+        })).json();
+        const creds = JSON.parse(localStorage.getItem('jellyfin_credentials') || '{}');
+        creds.Servers = (creds.Servers || []).filter((s) => s.Id !== auth.ServerId);
+        creds.Servers.push({
+            ManualAddress: base, Id: auth.ServerId, UserId: auth.User.Id,
+            AccessToken: auth.AccessToken, Name: probe.ServerName,
+            LastConnectionMode: 2, DateLastAccessed: Date.now()
+        });
+        localStorage.setItem('jellyfin_credentials', JSON.stringify(creds));
+        return { serverId: auth.ServerId, name: probe.ServerName, version: probe.Version };
+    }, SOURCE2, USER, PASS);
+
+    if (second.absent) {
+        skip('two source servers are held apart', `no second server at ${SOURCE2}`
+            + ' — start one with: stdjflib container --port 8097 --keep-running <library>');
+    } else {
+        check('the downloader sees both source servers',
+            !!second.serverId && second.serverId !== added.serverId,
+            `${added.serverId} and ${second.serverId}`);
+
+        // Resolved by name rather than hard-coded: the id is a function of the
+        // path this server mounts the library at, which is not ours to assume.
+        const crossed = await page.evaluate(async (pid, otherId, name) => {
+            const { knownServers, SourceServer } = await import('/web/plugin/source.js');
+            const { downloadItem, listDownloads, removeDownload } = await import('/web/plugin/downloader.js');
+            const info = knownServers(pid).find((s) => s.id === otherId);
+            if (!info) return { error: 'the second server is not in knownServers' };
+            const server = new SourceServer(info);
+            // No Fields override: items() already asks for everything the
+            // downloader reads, and naming a narrower set here would quietly
+            // hand it a DTO missing Trickplay and ParentId.
+            const found = (await server.items({
+                IncludeItemTypes: 'Movie', SearchTerm: name, Limit: 20
+            })).Items.find((i) => i.Name === name
+                && (i.MediaSources || []).length === 1
+                && i.MediaSources[0].Container === 'mp4');
+            if (!found) return { error: `no single-source mp4 named ${name} on the second server` };
+
+            let row;
+            try {
+                row = await downloadItem(server, found, {});
+            } catch (err) {
+                // Reported, not thrown. A second server that is reachable but
+                // cannot serve its own files -- a container whose media mount has
+                // gone stale is the way this happens -- used to take the whole
+                // run down from inside page.evaluate.
+                return { error: `download from the second server failed: ${err.message || err}` };
+            }
+            const rows = await window.PS_DB.all('items');
+            const dl = await listDownloads();
+            const served = await (await fetch('/Items/' + found.Id)).json();
+            const media = await fetch(`/Videos/${found.Id}/stream.${row.container}?Static=true`,
+                { headers: { Range: 'bytes=0-1023' } });
+            return {
+                downloadedId: found.Id,
+                state: row.state,
+                rowServer: (rows.find((r) => r.id === found.Id) || {}).srv,
+                servers: [...new Set(rows.map((r) => r.srv))],
+                downloadServers: [...new Set(dl.map((r) => r.srv))],
+                servedServerId: served.ServerId,
+                mediaStatus: media.status,
+                mediaBytes: (await media.arrayBuffer()).byteLength
+            };
+        }, phantomId, second.serverId, direct.name);
+
+        check('an item downloaded from the second server is stored under it',
+            !crossed.error && crossed.state === 'complete'
+            && crossed.rowServer === second.serverId,
+            crossed.error || `state ${crossed.state}, row srv ${crossed.rowServer}`);
+        check('the library holds rows from both servers at once',
+            !crossed.error && (crossed.servers || []).length === 2
+            && (crossed.downloadServers || []).length === 2,
+            crossed.error || `items from ${(crossed.servers || []).length} server(s),`
+                + ` downloads from ${(crossed.downloadServers || []).length}`);
+        check('and re-homes both onto the phantom when it serves them',
+            !crossed.error && crossed.servedServerId === phantomId,
+            crossed.error || `served ServerId ${crossed.servedServerId}`);
+        check('media from the second server serves from storage',
+            !crossed.error && crossed.mediaStatus === 206 && crossed.mediaBytes === 1024,
+            crossed.error || `${crossed.mediaStatus} ${crossed.mediaBytes}b`);
+
+        // The removal sweep recomputes reachability per server. A sweep that
+        // ignored srv would take the first server's rows with it, and every
+        // earlier removal check uses one server and cannot see that.
+        const afterRemoval = await page.evaluate(async (otherItemId, firstItemId) => {
+            const { listDownloads, removeDownload } = await import('/web/plugin/downloader.js');
+            const row = (await listDownloads()).find((r) => r.itemId === otherItemId);
+            if (!row) return { error: 'the second server\'s download row is gone already' };
+            await removeDownload(row);
+            const rows = await window.PS_DB.all('items');
+            const dl = await listDownloads();
+            const first = await fetch('/Items/' + firstItemId);
+            return {
+                otherRowGone: !rows.some((r) => r.id === otherItemId),
+                firstRowKept: rows.some((r) => r.id === firstItemId),
+                firstDownloadKept: dl.some((r) => r.itemId === firstItemId),
+                firstStillServed: first.status
+            };
+        }, crossed.downloadedId, direct.id);
+
+        check('removing one server\'s copy leaves the other server\'s alone',
+            !afterRemoval.error && afterRemoval.otherRowGone === true
+            && afterRemoval.firstRowKept === true && afterRemoval.firstDownloadKept === true
+            && afterRemoval.firstStillServed === 200,
+            afterRemoval.error || `other gone ${afterRemoval.otherRowGone},`
+                + ` first kept ${afterRemoval.firstRowKept}/${afterRemoval.firstDownloadKept},`
+                + ` serves ${afterRemoval.firstStillServed}`);
+    }
+
     // ---- 10. offline ------------------------------------------------------
 
     // Errors raised from here on are about a network that is deliberately gone.
@@ -2526,6 +2664,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     await browser.close();
 
     const failed = results.filter((r) => !r.ok);
-    console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
+    const skipped = results.filter((r) => r.skipped);
+    console.log(`\n${results.length - failed.length - skipped.length}/${results.length - skipped.length} checks passed`
+        + (skipped.length ? `, ${skipped.length} skipped` : ''));
     process.exit(failed.length ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });
