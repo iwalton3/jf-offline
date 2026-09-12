@@ -71,12 +71,30 @@ settings page shows the progress.
 
 ### An optional jellyfin-web patch
 
+To see the entry points locally, patch a checkout and point the dev host at its
+build. `tools/patch-web.sh` applies and reverts them and reports whether a
+checkout is patched:
+
+```sh
+git worktree add /tmp/jfweb-12 origin/release-12.z   # or use your own checkout
+tools/patch-web.sh apply /tmp/jfweb-12
+(cd /tmp/jfweb-12 && npm ci && npm run build:production)
+python3 serve.py --webroot /tmp/jfweb-12/dist
+```
+
+`serve.py --webroot` takes any build, so a patched and a stock one can sit side
+by side and the suite can be run against either. It is worth running against
+both: the suite reports the patch's absence rather than failing on it, so only a
+patched build exercises the menu entry.
+
+
 `patches/` adds two entry points to jellyfin-web: **Manage Downloads** in the user
 menu and **Sync Offline** in an item's context menu, each opening the manager in a
 near-full-page modal. Thirty-seven lines across two files, and every entry is
 guarded on `window.__phantom?.ui`, so a build without the patch is unaffected and
 the manager stays reachable through its Offline Sync settings page. CI warns and
-carries on if a patch no longer applies.
+carries on if a patch no longer applies. Verified against `release-12.z`, which
+is the branch CI builds.
 
 ### Two things the host must do
 

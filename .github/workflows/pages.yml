@@ -24,10 +24,11 @@ env:
   # A GitHub Pages project site is served from a subdirectory, not its own host,
   # so everything has to work under this prefix. Change it here only.
   BASE_PATH: /jf-offline
-  # Pinned rather than tracking master: the overlay integrates at jellyfin-web's
-  # seams, and a seam that moves should break a deliberate bump rather than a
-  # deploy nobody was watching.
-  JELLYFIN_WEB_REF: master
+  # The v12 stable branch, not master. The overlay integrates at jellyfin-web's
+  # seams, so a seam that moves should break a deliberate bump rather than a
+  # deploy nobody was watching. Every seam and the patch were verified against
+  # this branch; master is 13.0.0 and is not what this deploys.
+  JELLYFIN_WEB_REF: release-12.z
 
 jobs:
   build:
