@@ -144,6 +144,15 @@ server itself.
 - **A worker cannot intercept a WebSocket.** No hook exists, and jellyfin-web will
   open one, because every item grid subscribes to `UserDataChanged` on mount
   (`emby-itemscontainer.js:294`). `ps-bootstrap.js` stands in for it.
+- **The home page is drawn from jellyfin-web's query cache, not from the worker.**
+  Every home section goes through react-query with a 60s `staleTime`, persisted
+  to IndexedDB, so a correct worker answer went unasked-for through a
+  `LibraryChanged` push, in-app navigation and a reload alike. No server message
+  reaches those keys — the app's own `REFRESH_NEEDED` clears only
+  `['User', id, 'Items']`, and the sections use `Views`, `LatestMedia`, `NextUp`
+  and `ResumeItems` — so `invalidateAppQueries` in `ps-bootstrap.js` takes the
+  client off React's root when a `LibraryChanged` arrives — internals, so failure
+  only logs. A home-page check has to run inside that minute or it proves nothing.
 - **Auth to a real server goes in the `Authorization` header.** On 12.0 the
   `api_key` query parameter is refused by `/Items/{id}/Download` and by the HLS
   playlist endpoints, which are exactly the two a download needs.
