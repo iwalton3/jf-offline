@@ -30,55 +30,79 @@
         return loading;
     }
 
+    /**
+     * Built inside a shadow root.
+     *
+     * jellyfin-web's stylesheets are global and opinionated about buttons and
+     * headings, and they reached in here: on a phone the close button was pushed
+     * outside the panel. A shadow root is the only way to be sure nothing does
+     * that, and it costs one wrapper element.
+     */
     function build() {
-        // Through the parser rather than document.createElement: jellyfin-web's
-        // webcomponents polyfill replaces createElement and an element made that
-        // way is never upgraded. See overlay/plugin/vdx-native-dom.js.
-        const holder = document.createElement('div');
-        holder.innerHTML = `
-            <div class="phantom-modal" role="dialog" aria-modal="true" aria-label="Offline downloads">
-                <div class="phantom-modal-backdrop"></div>
-                <div class="phantom-modal-panel">
-                    <div class="phantom-modal-bar">
+        const host = document.createElement('div');
+        host.setAttribute('data-phantom-modal', '');
+        const root = host.attachShadow({ mode: 'open' });
+
+        root.innerHTML = `
+            <style>
+                /* Everything inside is ours; nothing leaks in or out. */
+                :host { all: initial; }
+                * { box-sizing: border-box; font-family: inherit; }
+                .wrap {
+                    position: fixed; inset: 0; z-index: 100000;
+                    display: flex; align-items: center; justify-content: center;
+                    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+                    color: #dde1e6;
+                }
+                .backdrop { position: absolute; inset: 0; background: rgba(0,0,0,.72); }
+                .panel {
+                    position: relative; display: flex; flex-direction: column;
+                    width: min(1100px, 94vw); max-width: 100%;
+                    height: min(88vh, 100%); max-height: 100%;
+                    background: #14171b;
+                    border: 1px solid #343a42; border-radius: 4px;
+                    box-shadow: 0 12px 48px rgba(0,0,0,.55);
+                    overflow: hidden;
+                }
+                .bar {
+                    display: flex; align-items: center; gap: .75em;
+                    padding: .85em 1em; border-bottom: 1px solid #343a42;
+                    flex: none; overflow: hidden;
+                }
+                /* min-width:0 is what lets the title shrink instead of shoving the
+                   button off the edge, which is what happened on a phone. */
+                .bar h2 {
+                    margin: 0; font-size: 16px; font-weight: 600;
+                    flex: 1 1 auto; min-width: 0;
+                    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+                }
+                .close {
+                    flex: none; white-space: nowrap;
+                    background: transparent; color: inherit;
+                    border: 1px solid #343a42; border-radius: 3px;
+                    padding: .4em 1em; font: inherit; font-size: 13px; cursor: pointer;
+                    min-width: 0; max-width: 40%;
+                }
+                .close:hover { border-color: #00a4dc; color: #00a4dc; }
+                .body { flex: 1 1 auto; overflow-y: auto; overflow-x: hidden; padding: 1em; }
+                @media (max-width: 640px) {
+                    .panel { width: 100%; height: 100%; border: none; border-radius: 0; }
+                    .bar { padding: .7em .75em; gap: .5em; }
+                    .close { padding: .4em .7em; }
+                    .body { padding: .75em; }
+                }
+            </style>
+            <div class="wrap" role="dialog" aria-modal="true" aria-label="Offline downloads">
+                <div class="backdrop"></div>
+                <div class="panel">
+                    <div class="bar">
                         <h2>Offline downloads</h2>
-                        <button type="button" class="phantom-modal-close" aria-label="Close">Close</button>
+                        <button type="button" class="close" aria-label="Close">Close</button>
                     </div>
-                    <div class="phantom-modal-body"><${TAG}></${TAG}></div>
+                    <div class="body"><${TAG}></${TAG}></div>
                 </div>
             </div>`;
-        const el = holder.firstElementChild;
-
-        const style = document.createElement('style');
-        style.textContent = `
-            .phantom-modal { position: fixed; inset: 0; z-index: 100000;
-                display: flex; align-items: center; justify-content: center; }
-            .phantom-modal-backdrop { position: absolute; inset: 0; background: rgba(0,0,0,.72); }
-            .phantom-modal-panel {
-                position: relative; display: flex; flex-direction: column;
-                width: min(1100px, 94vw); height: min(88vh, 100%);
-                background: #14171b; color: #dde1e6;
-                border: 1px solid #343a42; border-radius: 4px;
-                box-shadow: 0 12px 48px rgba(0,0,0,.55);
-            }
-            .phantom-modal-bar {
-                display: flex; align-items: center; gap: 1em;
-                padding: .85em 1em; border-bottom: 1px solid #343a42; flex: none;
-            }
-            .phantom-modal-bar h2 { margin: 0; font-size: 16px; font-weight: 600; flex: 1 1 auto; }
-            .phantom-modal-close {
-                flex: none; background: transparent; color: inherit;
-                border: 1px solid #343a42; border-radius: 3px;
-                padding: .4em 1em; font: inherit; font-size: 13px; cursor: pointer;
-            }
-            .phantom-modal-close:hover { border-color: #00a4dc; color: #00a4dc; }
-            /* The body scrolls, not the page behind it. */
-            .phantom-modal-body { flex: 1 1 auto; overflow-y: auto; padding: 1em; }
-            @media (max-width: 640px) {
-                .phantom-modal-panel { width: 100vw; height: 100vh; border: none; border-radius: 0; }
-            }
-        `;
-        el.appendChild(style);
-        return el;
+        return host;
     }
 
     function close() {
@@ -112,11 +136,12 @@
         // The page behind must not scroll under a full-height panel.
         document.documentElement.style.overflow = 'hidden';
 
-        overlay.querySelector('.phantom-modal-close').addEventListener('click', close);
-        overlay.querySelector('.phantom-modal-backdrop').addEventListener('click', close);
+        const root = overlay.shadowRoot;
+        root.querySelector('.close').addEventListener('click', close);
+        root.querySelector('.backdrop').addEventListener('click', close);
         document.addEventListener('keydown', onKeyDown, true);
 
-        const manager = overlay.querySelector(TAG);
+        const manager = root.querySelector(TAG);
         if (options.itemId && manager) {
             // The element upgrades asynchronously; openFor exists once it has.
             const deadline = Date.now() + 5000;
@@ -131,5 +156,11 @@
     }
 
     g.__phantom = g.__phantom || {};
-    g.__phantom.ui = { open, close, isOpen: () => !!overlay };
+    g.__phantom.ui = {
+        open,
+        close,
+        isOpen: () => !!overlay,
+        // The manager lives in a shadow root, so reaching it needs a way in.
+        element: () => (overlay ? overlay.shadowRoot.querySelector(TAG) : null)
+    };
 })(window);

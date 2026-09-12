@@ -130,7 +130,7 @@
     // Offline app shell. The worker does the work; this keeps poking it, because a
     // worker part-way through two thousand fetches will be killed and only wakes
     // again when something sends it an event.
-    const precache = { done: 0, total: 0, version: null, listeners: new Set() };
+    const precache = { done: 0, total: 0, version: null, ready: false, listeners: new Set() };
     const update = { waiting: false, listeners: new Set() };
 
     const announce = () => {
@@ -150,7 +150,9 @@
     }
 
     const poke = () => {
-        if (precache.total && precache.done >= precache.total) return;
+        // Kept poking until the swap, not merely until the fetching stops: the
+        // cache being full is not the same as it being the one in use.
+        if (precache.ready) return;
         tellWorker('precache');
     };
 

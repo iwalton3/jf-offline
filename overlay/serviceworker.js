@@ -112,7 +112,17 @@ if (IS_SERVICE_WORKER) {
             || path === '/web/diag.html';
     };
 
-    async function appShell(request, url) {
+    /** Keep the held document current without anybody waiting on it. */
+    async function refreshDocument(cache, key) {
+        try {
+            const fresh = await fetch(WEB + 'index.html', { cache: 'no-store' });
+            if (fresh.ok) await cache.put(key, fresh.clone());
+        } catch {
+            // Offline. The copy we just served is the point.
+        }
+    }
+
+    async function appShell(request, url, waitUntil) {
         const cache = await activeCache();
         // Navigations are keyed on the document itself, which is the name the
         // manifest uses, so a precached cache already holds the entry a
@@ -120,10 +130,22 @@ if (IS_SERVICE_WORKER) {
         const key = isNavigation(request, url) ? WEB + 'index.html' : url.pathname;
 
         if (isNavigation(request, url)) {
-            // Network first, so an updated build lands without clearing storage;
-            // the cached copy is what makes the app open with no network at all.
-            // The host serves index.html with the bootstrap tags already in it, so
-            // there is nothing to rewrite here.
+            // Cache FIRST for the document, then refresh in the background.
+            //
+            // Network-first meant every cold start waited on a request, and an
+            // offline start waited for it to fail — which on a phone is not
+            // always prompt, and was reported as the app failing to open in
+            // airplane mode despite everything being held. A held document
+            // should never depend on the network being anything in particular.
+            //
+            // The cost is that a new build's document lands one load later,
+            // which is already exactly how a worker update behaves.
+            const cached = await cache.match(key) || await caches.match(key);
+            if (cached) {
+                // Tracked through the event so the worker stays alive for it.
+                waitUntil(refreshDocument(cache, key));
+                return cached;
+            }
             try {
                 const fresh = await fetch(WEB + 'index.html', { cache: 'no-store' });
                 if (fresh.ok) {
@@ -131,10 +153,8 @@ if (IS_SERVICE_WORKER) {
                     return fresh;
                 }
             } catch {
-                // offline; fall through to whatever we hold
+                // offline on a first visit: there is nothing to serve
             }
-            const cached = await cache.match(key) || await caches.match(key);
-            if (cached) return cached;
             return new Response('offline and no cached app shell', { status: 503 });
         }
 
@@ -264,8 +284,10 @@ if (IS_SERVICE_WORKER) {
         if (!manifest) {
             // Offline: report what the live cache holds rather than nothing, so the
             // settings page does not claim the app is unheld while it is serving it.
+            // Ready is a swap that already happened, which is knowable offline.
             const held = await (await activeCache()).keys();
-            return { done: held.length, total: held.length, offline: true };
+            const version = await self.PS_DB.meta.get('precacheVersion', null);
+            return { done: held.length, total: held.length, offline: true, ready: !!version };
         }
         const building = await caches.open(CACHE_PREFIX + manifest.version);
         const keys = await building.keys();
@@ -293,7 +315,7 @@ if (IS_SERVICE_WORKER) {
         if (url.origin !== self.location.origin) return;
 
         if (!self.PS_ROUTER.handles(url.pathname)) {
-            event.respondWith(appShell(request, url));
+            event.respondWith(appShell(request, url, (promise) => event.waitUntil(promise)));
             return;
         }
 

@@ -1384,6 +1384,52 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
             && leak.second.seasons < leak.bigSeasons,
         leak.error || `${leak.second.seasons} seasons vs the previous ${leak.bigSeasons}, grid ${leak.second.gridRows}`);
 
+    // An item with nothing to ask about must still download. This is the path
+    // that silently did nothing: start() held the exclusive lock, so the run()
+    // it called at the end was refused and the download never began.
+    const noQuestions = await page.evaluate(async (itemId) => {
+        const el = document.querySelector('offline-sync-manager');
+        if (!el) return { error: 'settings page did not mount' };
+        const { knownServers, SourceServer } = await import('/web/plugin/source.js');
+        const { removeDownload, listDownloads, inspectSubtitles } = await import('/web/plugin/downloader.js');
+        const source = knownServers(window.PS_SCHEMA.ID.SERVER)[0];
+        const server = new SourceServer(source);
+        const item = await server.item(itemId);
+
+        const info = await inspectSubtitles(server, item);
+        const asksNothing = !info.willTranscode
+            && !info.tracks.some((t) => !t.canExtract) && info.audio.length <= 1;
+
+        for (const row of (await listDownloads()).filter((r) => r.itemId === itemId)) {
+            await removeDownload(row);
+        }
+
+        el.state.servers = knownServers(window.PS_SCHEMA.ID.SERVER);
+        el.state.serverId = source.id;
+        el.start(item);
+
+        const deadline = Date.now() + 120000;
+        let row = null;
+        while (Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, 500));
+            row = (await listDownloads()).find((r) => r.itemId === itemId);
+            if (row && row.state === 'complete') break;
+            if (el.state.error) break;
+        }
+        return {
+            asksNothing,
+            asked: !!el.state.asking,
+            state: row ? row.state : 'no row',
+            error: el.state.error || null
+        };
+    }, DIRECT_ITEM);
+
+    check('an item with nothing to ask about needs no dialog',
+        !noQuestions.error && noQuestions.asksNothing === true && noQuestions.asked === false,
+        noQuestions.error || `asksNothing=${noQuestions.asksNothing} asked=${noQuestions.asked}`);
+    check('and downloads when Download is pressed',
+        noQuestions.state === 'complete', noQuestions.error || noQuestions.state);
+
     check('rows keep working buttons after a busy render',
         rowState.count > 0 && rowState.disabled === 0,
         `${rowState.disabled} of ${rowState.count} disabled`);
@@ -1398,8 +1444,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         if (!window.__phantom || !window.__phantom.ui) return { error: 'no ui api' };
         await window.__phantom.ui.open();
         await new Promise((r) => setTimeout(r, 2000));
-        const panel = document.querySelector('.phantom-modal');
-        const manager = panel && panel.querySelector('offline-sync-manager');
+        const panel = document.querySelector('[data-phantom-modal]');
+        const manager = window.__phantom.ui.element();
         const root = manager && (manager.shadowRoot || manager);
         const state = {
             open: !!panel,
@@ -1409,7 +1455,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         };
         window.__phantom.ui.close();
         await new Promise((r) => setTimeout(r, 200));
-        state.closed = !document.querySelector('.phantom-modal');
+        state.closed = !document.querySelector('[data-phantom-modal]');
         state.scrollRestored = document.documentElement.style.overflow !== 'hidden';
         return state;
     }, phantomId);
@@ -1430,7 +1476,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         const deadline = Date.now() + 20000;
         let manager = null;
         while (Date.now() < deadline) {
-            manager = document.querySelector('.phantom-modal offline-sync-manager');
+            manager = window.__phantom.ui.element();
             if (manager && manager.state && (manager.state.asking || manager.state.error)) break;
             await new Promise((r) => setTimeout(r, 200));
         }
@@ -1462,7 +1508,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         }
         entry.click();
         await new Promise((r) => setTimeout(r, 2000));
-        const opened = !!document.querySelector('.phantom-modal');
+        const opened = !!document.querySelector('[data-phantom-modal]');
         window.__phantom.ui.close();
         return { present: true, opened };
     });

@@ -98,7 +98,7 @@ class OfflineSyncManager extends Component {
         held: [],
         storage: { usage: 0, quota: 0 },
         persisted: false,
-        precache: { done: 0, total: 0 },
+        precache: { done: 0, total: 0, ready: false },
         status: '',
         error: '',
         busy: false,
@@ -341,7 +341,7 @@ class OfflineSyncManager extends Component {
 
         if (window.__phantom && window.__phantom.onPrecache) {
             this._offPrecache = window.__phantom.onPrecache((p) => {
-                this.state.precache = { done: p.done, total: p.total };
+                this.state.precache = { done: p.done, total: p.total, ready: !!p.ready };
             });
             window.__phantom.refreshPrecache();
         }
@@ -700,12 +700,19 @@ class OfflineSyncManager extends Component {
      */
     start(item) {
         if (!this.canDownload()) return;
+        // Refused here rather than by the lock below: a download already running
+        // is the thing to decline, and `checking` is not a download.
+        if (this.state.busy) return;
         const server = this.server();
         // Cleared before anything is read, so a question that fails part way
         // through cannot leave the previous one's answers on screen either.
         this.resetAsk();
         this.state.notes = [];
-        this.exclusive(`Checking ${item.Name}`, async () => {
+        // NOT exclusive. Checking an item can end by calling run(), which takes
+        // the exclusive lock — and holding it here meant run() was refused and the
+        // download silently never started, for every item with nothing to ask
+        // about. The lock belongs to the download, not to the question.
+        this.task(`Checking ${item.Name}`, async () => {
             const isSeries = item.Type === 'Series';
             let series = null;
             let sample = item;
@@ -1099,8 +1106,12 @@ class OfflineSyncManager extends Component {
     }
 
     renderPrecache() {
-        const { done, total } = this.state.precache;
-        const complete = total > 0 && done >= total;
+        const { done, total, ready } = this.state.precache;
+        // `ready` means the live cache pointer names a complete cache, which is
+        // not the same as having fetched everything: until the swap the app is
+        // still served from the previous one. Claiming completeness on the count
+        // is how it could say the client was held offline and then not open.
+        const complete = ready === true;
         const pct = total ? Math.min(100, (done / total) * 100) : 0;
         return html`
             <div>
@@ -1391,7 +1402,12 @@ class OfflineSyncManager extends Component {
                         </div>
                         <div class="panel scroller ${s.busy ? 'busy' : ''}"
                             on-scroll="${(ev) => this.onListScroll(ev)}">
-                            ${when(!s.items.length, () => this.renderSkeletons())}
+                            ${when(!s.items.length && s.loadingItems, () => this.renderSkeletons())}
+                            ${when(!s.items.length && !s.loadingItems, () => html`
+                                <div class="item"><span class="note">
+                                    ${s.itemFilter ? 'Nothing here matches that.' : 'This library is empty.'}
+                                </span></div>
+                            `)}
                             ${when(s.items.length > 0, () => html`
                                 <cl-virtual-list
                                     items="${s.items}"

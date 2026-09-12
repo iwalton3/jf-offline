@@ -77,7 +77,7 @@ const check = (name, ok, detail) => {
     const modal = await page.evaluate(async () => {
         await window.__phantom.ui.open();
         await new Promise((r) => setTimeout(r, 3000));
-        const el = document.querySelector('.phantom-modal offline-sync-manager');
+        const el = window.__phantom.ui.element();
         const root = el && (el.shadowRoot || el);
         const ok = !!(root && /Downloaded|servers/i.test(root.textContent || ''));
         window.__phantom.ui.close();

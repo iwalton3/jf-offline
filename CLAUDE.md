@@ -57,6 +57,16 @@ HEADFUL=1 ... node tools/smoke.js   # to watch it
   comma-separated elsewhere. Reading only the last value made the search screen
   ask for a dozen types and receive a filter of one, so every section but the
   first looked empty. Always read through `PS_HTTP.Params`.
+- **The document is served cache-first, everything else network-first.** A cold
+  start must not wait on a request, and an offline one must not wait for a
+  request to fail — on a phone that is not always prompt, and it was reported as
+  the app refusing to open in airplane mode with everything held. The cost is
+  that a new build's document lands one load later, which is exactly how a worker
+  update already behaves.
+- **Offline-ready is the cache POINTER, not a file count.** `precacheStatus`
+  reports `ready` only when the live pointer names a complete cache; claiming
+  completeness from `done >= total` is how the page could say the client was held
+  offline while still being served from the previous cache.
 - **Never empty the live cache.** Fill a new versioned cache, swap the stored
   pointer, then delete the old one. Deleting first left tens of seconds with
   nothing cached, and writes issued in that window went into a deleted cache and
@@ -177,6 +187,14 @@ HEADFUL=1 ... node tools/smoke.js   # to watch it
   `tools/check-update.js` measures this; `ps-bootstrap.js` calls `update()` on
   load so the check happens promptly, which is the difference between "next
   start" and "eventually", and surfaces a waiting update so the page can say so.
+
+- **`exclusive()` is for the download, not for the question.** `start()` inspects
+  an item and may end by calling `run()`, which takes the lock — holding it across
+  the inspection meant `run()` was refused and the download silently never began,
+  for every item with nothing to ask about. Checking uses `task()`.
+- **The modal lives in a shadow root.** jellyfin-web's stylesheets are global and
+  reached into it: on a phone the close button was pushed outside the panel.
+  `window.__phantom.ui.element()` is how anything reaches the manager inside it.
 
 ## The schema is shaped for features that do not exist yet
 
