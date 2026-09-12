@@ -7,6 +7,8 @@
  * is Chrome-only, which is no longer a constraint here.
  */
 
+import { deviceProfile } from './source.js';
+
 const S = () => window.PS_SCHEMA;
 const DB = () => window.PS_DB;
 const OPFS = () => window.PS_OPFS;
@@ -114,6 +116,47 @@ export async function assertAllowed(server, { transcoding } = {}) {
 function directPlayable(container) {
     const c = String(container || '').toLowerCase();
     return c === 'mp4' || c === 'm4v' || c === 'webm' || c === 'mov';
+}
+
+/**
+ * What the server will actually do to produce the HLS rendition.
+ *
+ * Measured against a 12.0 server, not inferred. A source whose video codec the
+ * transcoding profile already targets comes back STREAM-COPIED: an mkv of h264
+ * at 1920x804 arrives as h264 at 1920x804, byte-identical whether or not a
+ * MaxHeight above its own height was asked for. Only a codec the profile cannot
+ * target — hevc, mpeg2, mpeg4 — is genuinely re-encoded.
+ *
+ * Which is why the quality cap must not be sent by default. Asking a 1920x804
+ * copy for MaxHeight=720 turns it into an encode at 1718x720 and a third of the
+ * bytes: strictly worse than doing nothing, for a file that needed nothing.
+ *
+ * `tools/remux-probe.py` is the measurement, and re-running it is how to check
+ * this against a different server version.
+ */
+export function hlsPlan(mediaSource, { burning } = {}) {
+    const streams = mediaSource.MediaStreams || [];
+    const video = streams.find((st) => st.Type === 'Video');
+    const audio = streams.find((st) => st.Type === 'Audio');
+    const profile = (deviceProfile().TranscodingProfiles || [])[0] || {};
+    const targets = (list) => String(list || '').toLowerCase().split(',').filter(Boolean);
+    const codec = (stream) => String((stream && stream.Codec) || '').toLowerCase();
+
+    // Burning is a picture operation: it forces an encode whatever the codec is.
+    const videoCopy = !burning && !!video && targets(profile.VideoCodec).includes(codec(video));
+    const audioCopy = !!audio && targets(profile.AudioCodec).includes(codec(audio))
+        && (audio.Channels || 0) <= Number(profile.MaxAudioChannels || 2);
+
+    return {
+        videoCopy,
+        audioCopy,
+        videoCodec: codec(video) || null,
+        audioCodec: codec(audio) || null,
+        height: (video && video.Height) || null,
+        // A copied video track is a remux however the audio is handled: the
+        // picture is untouched, which is the part that cannot be got back.
+        remux: videoCopy
+    };
 }
 
 async function putItem(server, dto) {
@@ -520,6 +563,7 @@ export async function downloadItem(server, reactiveDto, options = {}) {
         && (mediaSource.SupportsDirectPlay || mediaSource.SupportsDirectStream)
         && directPlayable(mediaSource.Container);
     const mode = canDirect ? S().DOWNLOAD_MODE.DIRECT : S().DOWNLOAD_MODE.HLS;
+    const plan = hlsPlan(mediaSource, { burning });
 
     if (!canDirect && !mediaSource.SupportsTranscoding) {
         throw new Error('server can neither stream nor transcode this item');
@@ -592,7 +636,9 @@ export async function downloadItem(server, reactiveDto, options = {}) {
             transcodeParams.SubtitleStreamIndex = -1;
         }
         if (chosenAudio != null) transcodeParams.AudioStreamIndex = chosenAudio;
-        Object.assign(transcodeParams, qualityParams(row.quality) || {});
+        // Only when the picture is being rebuilt anyway. On a stream copy the cap
+        // is what creates the re-encode it was meant to bound. See hlsPlan().
+        if (!plan.videoCopy) Object.assign(transcodeParams, qualityParams(row.quality) || {});
         const extraParams = Object.keys(transcodeParams).length ? transcodeParams : null;
 
         const result = mode === S().DOWNLOAD_MODE.DIRECT
@@ -663,6 +709,7 @@ export async function inspectSubtitles(server, reactiveDto) {
     if (!mediaSource) return { tracks: [], audio: [], container: null };
     const canDirect = (mediaSource.SupportsDirectPlay || mediaSource.SupportsDirectStream)
         && directPlayable(mediaSource.Container);
+    const plan = hlsPlan(mediaSource, {});
     const tracks = subtitleOptions(mediaSource);
     const picture = tracks.filter((t) => !t.canExtract);
     const serverDefault = mediaSource.DefaultSubtitleStreamIndex;
@@ -679,8 +726,16 @@ export async function inspectSubtitles(server, reactiveDto) {
             : null,
         // Worth saying out loud before the button is pressed: a transcode is work
         // on somebody else's machine, and a series is that work N times over.
-        willTranscode: !canDirect,
-        reasons: mediaSource.TranscodeReasons || null
+        // A remux is not that — the picture is copied — so the two are separate
+        // answers and only one of them is a warning.
+        willTranscode: !canDirect && !plan.remux,
+        willRemux: !canDirect && plan.remux,
+        videoCodec: plan.videoCodec,
+        videoHeight: plan.height,
+        audioCodec: plan.audioCodec,
+        // A copied picture with converted sound is still a remux, but saying so
+        // is the difference between "nothing happens to this file" and the truth.
+        audioWillConvert: !canDirect && plan.remux && !plan.audioCopy
     };
 }
 

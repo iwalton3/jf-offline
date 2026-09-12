@@ -63,10 +63,13 @@ const askDefaults = () => ({
     askUnwatchedOnly: false,
     askSummary: '',
     askTranscode: false,
+    askRemux: false,
+    askRemuxAudio: false,
     askQuality: '',
     askPicture: [],
     askServerWouldBurn: null,
     askContainer: '',
+    askVideo: '',
     askInconsistent: false,
     // The per-episode grid. Also the largest thing here by far — one
     // PlaybackInfo per episode — so leaving it behind wastes memory as well as
@@ -569,18 +572,14 @@ class OfflineSyncManager extends Component {
         const size = (entries) => entries.reduce((n, e) => n + (e.row.bytesDone || 0), 0);
         const isOpen = (id) => this.state.expanded.includes(id);
 
-        if (films.length) {
-            films.sort((a, b) => String(a.row.name).localeCompare(String(b.row.name)));
-            nodes.push({
-                kind: 'group', id: 'films', depth: 0, title: 'Movies and videos',
-                count: films.length, bytes: size(films), open: isOpen('films'),
-                rows: films.map((e) => e.row)
-            });
-            if (isOpen('films')) {
-                for (const entry of films) {
-                    nodes.push({ kind: 'item', id: 'f:' + entry.row.itemId, depth: 1, entry });
-                }
-            }
+        // Movies are listed flat, with no group above them. A group carries a
+        // "Remove group" button, and for films that button meant "remove every
+        // film I hold" sitting one click from the list — a whole catalogue behind
+        // the same control that removes one season of one show. Episodes have a
+        // series to belong to, so grouping them earns its delete; films do not.
+        films.sort((a, b) => String(a.row.name).localeCompare(String(b.row.name)));
+        for (const entry of films) {
+            nodes.push({ kind: 'item', id: 'f:' + entry.row.itemId, depth: 0, entry });
         }
 
         for (const show of [...series.values()].sort((a, b) => a.name.localeCompare(b.name))) {
@@ -736,6 +735,8 @@ class OfflineSyncManager extends Component {
 
             // A transcode is work on somebody else's machine, and a series is that
             // work once per episode, so it is worth saying before rather than after.
+            // A remux is deliberately NOT in this list. The picture is copied,
+            // so there is nothing to warn about and nothing to choose.
             if (!isSeries && !needsSubtitleChoice && !needsAudioChoice && !inspected.willTranscode) {
                 await this.run(item, { mode: 'auto' }, null, {});
                 return;
@@ -755,6 +756,11 @@ class OfflineSyncManager extends Component {
                 : '';
             this.state.askInconsistent = !!(consistency && !consistency.consistent);
             this.state.askTranscode = !!inspected.willTranscode;
+            this.state.askRemux = !!inspected.willRemux;
+            this.state.askRemuxAudio = !!inspected.audioWillConvert;
+            this.state.askVideo = inspected.videoCodec
+                ? inspected.videoCodec + (inspected.videoHeight ? ` ${inspected.videoHeight}p` : '')
+                : '';
             this.state.askQuality = window.PS_SCHEMA.DEFAULT_QUALITY;
             this.state.askPicture = inspected.pictureTracks || [];
             this.state.askServerWouldBurn = inspected.serverWouldBurn || null;
@@ -1050,7 +1056,7 @@ class OfflineSyncManager extends Component {
             `;
         }
 
-        const label = node.kind === 'season' ? 'season' : (node.kind === 'series' ? 'series' : 'group');
+        const label = node.kind === 'season' ? 'season' : 'series';
         return html`
             <div class="item node-group"
                 style="padding-left:${0.85 + node.depth * 1.4}em"
@@ -1232,9 +1238,9 @@ class OfflineSyncManager extends Component {
 
                         ${when(s.askTranscode, () => html`
                             <div class="warn">
-                                <strong>This needs your server to transcode.</strong>
-                                The file is ${s.askContainer || 'in a container'} that this browser
-                                cannot play, so the server has to re-encode it — for every episode,
+                                <strong>This needs your server to re-encode the video.</strong>
+                                The picture is ${s.askVideo || 'in a codec'} that this browser
+                                cannot play, so the server has to rebuild it — for every episode,
                                 one after another. That is real work on the machine hosting your
                                 library, and it may be slow or heavy for whoever else is using it.
                             </div>
@@ -1244,6 +1250,18 @@ class OfflineSyncManager extends Component {
                                     options="${this.qualityOptions}"
                                     value="${s.askQuality}"
                                     on-change="${(ev) => this.onAskQualityChange(ev)}"></cl-dropdown>
+                            </div>
+                        `)}
+
+                        ${when(s.askRemux && !s.askTranscode, () => html`
+                            <div class="note">
+                                The video is ${s.askVideo || 'already playable'} but sits in
+                                ${s.askContainer ? 'a ' + s.askContainer : 'a container'} this
+                                browser cannot open, so your server repackages it on the way out.
+                                The picture is copied rather than re-encoded, so nothing is lost
+                                and there is no quality to choose.${s.askRemuxAudio
+                                    ? ' The soundtrack is converted to AAC, which the picture is not.'
+                                    : ''}
                             </div>
                         `)}
 

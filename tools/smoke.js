@@ -26,6 +26,13 @@ const ASS_ITEM = process.env.JF_ASS_ITEM || 'c481c35858cfe4b4ec22187d8c96dc92';
 const MULTI_AUDIO_ITEM = process.env.JF_AUDIO_ITEM || 'c72448f6b10acfae9edd95c2b1d06775';
 // One subtitle track, flagged forced.
 const FORCED_SUB_ITEM = process.env.JF_FORCED_ITEM || '7eda0c4da7bb755f0e6ef4f6e84caad8';
+// h264 in an mkv, 1920x804 — taller than the default 720p cap, so a cap that is
+// sent when it should not be is visible in the output rather than a no-op.
+const REMUX_TALL_ITEM = process.env.JF_REMUX_ITEM || '1531031ad1fb4f42b9bcd819c42f2760';
+// h264 picture, DTS 5.1 sound: the picture is copied and only the sound converted.
+const REMUX_FOREIGN_AUDIO_ITEM = process.env.JF_REMUX_AUDIO_ITEM || '443e17b426971cdc8c7d4d3dd1ff14cf';
+// hevc, which the transcoding profile cannot target, so it is genuinely re-encoded.
+const REENCODE_ITEM = process.env.JF_REENCODE_ITEM || '0a7fa7476a1ee92a53e895d4618ad76a';
 // Three seasons, sixty episodes: enough to tell a season filter from no filter.
 const MULTI_SEASON_SERIES = process.env.JF_SERIES || '2f9ea3e079631ea97fae6ebadb569063';
 // One season, one episode: cheap to hold so later checks have a real series.
@@ -415,6 +422,89 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     check('jellyfin-web plays a downloaded transcode through hls.js', playedHls.ok === true,
         playedHls.error || `t=${playedHls.currentTime.toFixed(2)}s`);
     await page.evaluate(() => { const v = document.querySelector('video'); if (v) { v.pause(); } });
+
+    // ---- 6a2. remux versus re-encode -------------------------------------
+    //
+    // The server stream-copies a source whose codec the transcoding profile
+    // already targets, at full resolution. Sending it a quality cap is what
+    // turns that copy into a re-encode — so a 1920x804 h264 mkv came back at
+    // 1718x720 and a third of the size, for a file that needed nothing done to
+    // it. tools/remux-probe.py is the measurement these assertions come from.
+
+    const plans = await page.evaluate(async (pid, ids) => {
+        const { knownServers, SourceServer } = await import('/web/plugin/source.js');
+        const { hlsPlan, inspectSubtitles } = await import('/web/plugin/downloader.js');
+        const known = knownServers(pid)[0];
+        if (!known) return { error: 'not signed in to the source server' };
+        const server = new SourceServer(known);
+        const out = {};
+        for (const [key, id] of Object.entries(ids)) {
+            const info = await server.playbackInfo(id);
+            const source = (info.MediaSources || [])[0];
+            out[key] = {
+                plan: hlsPlan(source, {}),
+                burned: hlsPlan(source, { burning: true }),
+                inspected: await inspectSubtitles(server, await server.item(id))
+            };
+        }
+        return out;
+    }, phantomId, {
+        tallCopy: REMUX_TALL_ITEM, foreignAudio: REMUX_FOREIGN_AUDIO_ITEM, encode: REENCODE_ITEM
+    });
+
+    check('an h264 source in a foreign container is a remux, not a transcode',
+        !plans.error && plans.tallCopy.plan.videoCopy === true
+        && plans.tallCopy.inspected.willRemux === true
+        && plans.tallCopy.inspected.willTranscode === false,
+        plans.error || JSON.stringify(plans.tallCopy && plans.tallCopy.plan));
+
+    check('a codec the profile cannot target is a real re-encode',
+        !plans.error && plans.encode.plan.videoCopy === false
+        && plans.encode.inspected.willTranscode === true
+        && plans.encode.inspected.willRemux === false,
+        plans.error || JSON.stringify(plans.encode && plans.encode.plan));
+
+    check('sound the profile cannot carry is converted while the picture is copied',
+        !plans.error && plans.foreignAudio.plan.videoCopy === true
+        && plans.foreignAudio.plan.audioCopy === false
+        && plans.foreignAudio.inspected.audioWillConvert === true,
+        plans.error || JSON.stringify(plans.foreignAudio && plans.foreignAudio.plan));
+
+    check('burning a subtitle in forces the encode a copy would have avoided',
+        !plans.error && plans.tallCopy.burned.videoCopy === false,
+        plans.error || JSON.stringify(plans.tallCopy && plans.tallCopy.burned));
+
+    // What the download actually asks the server for. The classification above is
+    // only worth anything if the cap follows it, and nothing else can see that.
+    const capUse = await page.evaluate(async (pid, copyId, quality) => {
+        const { knownServers, SourceServer } = await import('/web/plugin/source.js');
+        const { downloadItem, removeDownload } = await import('/web/plugin/downloader.js');
+        const known = knownServers(pid)[0];
+        if (!known) return { error: 'not signed in to the source server' };
+        const server = new SourceServer(known);
+        const asked = [];
+        const originalFetch = window.fetch;
+        window.fetch = function (input, init) {
+            asked.push(String(input && input.url ? input.url : input));
+            return originalFetch.call(this, input, init);
+        };
+        try {
+            const row = await downloadItem(server, await server.item(copyId), { quality });
+            await removeDownload(row);
+        } finally {
+            window.fetch = originalFetch;
+        }
+        const hls = asked.filter((u) => /m3u8|hls1\//.test(u));
+        return {
+            requests: hls.length,
+            capped: hls.filter((u) => /MaxHeight|VideoBitrate=3000000/.test(u)).length,
+            sample: hls[0] || null
+        };
+    }, phantomId, REMUX_TALL_ITEM, '720p');
+
+    check('a copied download is never asked for at a reduced height',
+        !capUse.error && capUse.requests > 0 && capUse.capped === 0,
+        capUse.error || `${capUse.capped} of ${capUse.requests} requests carried a cap`);
 
     // ---- 6b. images, subtitles, burn-in ----------------------------------
 
@@ -1281,6 +1371,31 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     check('the list pages past the first page as it scrolls',
         !uiPaging.error && (uiPaging.total <= uiPaging.afterFirst || uiPaging.afterSecond > uiPaging.afterFirst),
         uiPaging.error || `${uiPaging.afterFirst} then ${uiPaging.afterSecond} of ${uiPaging.total}`);
+    // Films sit at the top level with no group above them. A group carries a
+    // "Remove group" button, and the one over the films meant "remove every film
+    // I hold" — a whole catalogue one click away, wearing the same control that
+    // removes a single season.
+    const tree = await page.evaluate(async () => {
+        const el = document.querySelector('offline-sync-manager');
+        if (!el) return { error: 'settings page did not mount' };
+        const nodes = el.downloadTree();
+        return {
+            total: nodes.length,
+            groups: nodes.filter((n) => n.kind === 'group').length,
+            // A node is a bulk delete if removing it takes more than one row.
+            bulkRows: Math.max(0, ...nodes.filter((n) => n.rows).map((n) => n.rows.length)),
+            bulkKinds: [...new Set(nodes.filter((n) => n.rows).map((n) => n.kind))],
+            filmsAtTop: nodes.filter((n) => n.kind === 'item' && n.depth === 0).length
+        };
+    });
+
+    check('films are listed with no group to delete them all at once',
+        !tree.error && tree.groups === 0 && tree.filmsAtTop > 0,
+        tree.error || JSON.stringify(tree));
+    check('only a series or a season can be removed in bulk',
+        !tree.error && tree.bulkKinds.every((k) => k === 'series' || k === 'season'),
+        tree.error || `bulk nodes: ${(tree.bulkKinds || []).join(',') || 'none'}`);
+
     const rowState = await page.evaluate(async () => {
         const el = document.querySelector('offline-sync-manager');
         if (!el) return { count: 0, disabled: 0, error: 'settings page did not mount' };

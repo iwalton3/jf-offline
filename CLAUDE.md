@@ -188,6 +188,27 @@ HEADFUL=1 ... node tools/smoke.js   # to watch it
   load so the check happens promptly, which is the difference between "next
   start" and "eventually", and surfaces a waiting update so the page can say so.
 
+- **PlaybackInfo cannot tell you whether a download is a remux or a re-encode,
+  and both its answers say "transcode".** `SupportsDirectStream` is false for
+  every container the device profile does not list, and `TranscodeReasons` is
+  absent from the MediaSource entirely — it lives only in the `TranscodingUrl`
+  query, where it reads `ContainerNotSupported,AudioCodecNotSupported` even for
+  a file whose audio the profile does carry. Measured instead: a source whose
+  video codec the transcoding profile already targets is STREAM-COPIED at full
+  resolution. `hlsPlan()` is that rule and `tools/remux-probe.py` is the
+  measurement; re-run it against a new server version rather than reasoning
+  about it.
+- **Never send a quality cap on a rendition the server would copy.** The cap is
+  what creates the encode it was meant to bound: an h264 mkv at 1920x804 arrives
+  untouched with no cap and at 1718x720, a third of the size, with `MaxHeight`
+  attached. So the cap follows `hlsPlan().videoCopy`, the question is only asked
+  when an encode is happening anyway, and a remux does not stop to ask at all.
+- **Only a series or a season may be removed in bulk.** Films are listed flat.
+  Grouping them put a "Remove group" button over the whole catalogue, wearing the
+  same control that removes one season of one show — reported as "deleting the
+  movies group deletes the entire catalog". A group earns its delete by being
+  something a person already thinks of as one thing.
+
 - **`exclusive()` is for the download, not for the question.** `start()` inspects
   an item and may end by calling `run()`, which takes the lock — holding it across
   the inspection meant `run()` was refused and the download silently never began,
