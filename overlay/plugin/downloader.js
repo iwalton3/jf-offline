@@ -171,7 +171,7 @@ async function putItem(server, dto) {
     });
 }
 
-async function putImages(server, dto) {
+async function putImages(server, dto, signal) {
     const wanted = [['Primary', dto.ImageTags && dto.ImageTags.Primary]];
     if (dto.ImageTags && dto.ImageTags.Thumb) wanted.push(['Thumb', dto.ImageTags.Thumb]);
     if (dto.ImageTags && dto.ImageTags.Logo) wanted.push(['Logo', dto.ImageTags.Logo]);
@@ -179,8 +179,12 @@ async function putImages(server, dto) {
 
     for (const [type, tag] of wanted) {
         if (!tag) continue;
+        // Outside the try, for the same reason as the other loops here: the catch
+        // below swallows a failure so a missing poster does not lose a download,
+        // and it would swallow an abort just as happily.
+        if (signal && signal.aborted) throw new DOMException('cancelled', 'AbortError');
         try {
-            const res = await server.fetch(server.imageUrl(dto.Id, type, tag));
+            const res = await server.fetchSignal(server.imageUrl(dto.Id, type, tag), signal);
             await OPFS().writeBlob(S().paths.image(server.id, dto.Id, type), await res.blob());
         } catch (err) {
             // An image is not worth failing a download over.
@@ -685,19 +689,19 @@ export async function downloadItem(server, reactiveDto, options = {}) {
                 : undefined;
         }
 
-        await putItem(server, dto);
-        await putImages(server, dto);
-
-        // Re-checked here because the window between the media transfer and this
-        // line is not brief — subtitles, font attachments and trickplay tiles all
-        // run in it, and so do the item's images. Nothing in that window used to
-        // observe a cancel, so pressing Cancel there ended with the item recorded
-        // COMPLETE and neither the files nor the row cleaned up. This is the one
-        // place COMPLETE is written, so it is the one place the invariant needs
-        // stating: a cancelled download is never recorded as held.
+        // Before anything is written to `items`, not after. The window between the
+        // media transfer and here is not brief — subtitles, font attachments and
+        // trickplay tiles all run in it — and none of those loops used to observe
+        // a cancel, so pressing Cancel there ended with the item recorded
+        // COMPLETE. Behind putItem it would be worse than useless: the library is
+        // derived from item rows, so a cancel landing after this line would leave
+        // a row for an item with no media and list it as playable.
         if ((inFlight.get(key) || {}).cancelled) {
             throw new DOMException('cancelled', 'AbortError');
         }
+
+        await putItem(server, dto);
+        await putImages(server, dto, controller.signal);
 
         row = await setRow(row, {
             state: S().DOWNLOAD_STATE.COMPLETE,
@@ -717,6 +721,14 @@ export async function downloadItem(server, reactiveDto, options = {}) {
             // file and count against storage with no way to tell why.
             await OPFS().removeDir(S().paths.mediaDir(server.id, dto.Id, mediaSource.Id));
             await DB().del('downloads', [server.id, dto.Id, mediaSource.Id]);
+            // The item row and its artwork too, because putItem and putImages may
+            // have run before the abort surfaced — putImages is a handful of
+            // fetches. The library is derived from item rows, not from download
+            // rows, so a row left here lists a cancelled item as playable and
+            // nothing ever removes it. Undo exactly what this call wrote; play
+            // history is not ours to delete, so userdata stays.
+            await OPFS().removeDir(S().paths.imageDir(server.id, dto.Id));
+            await DB().del('items', [server.id, dto.Id]);
             const cancelError = new Error('cancelled');
             cancelError.cancelled = true;
             throw cancelError;

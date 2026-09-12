@@ -947,11 +947,25 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         let outcome = 'completed';
         try { await promise; } catch (err) { outcome = err.cancelled ? 'cancelled' : 'error:' + err.message; }
         const after = (await listDownloads()).length;
-        return { stopped, outcome, before, after };
+
+        // The user-visible claim, which holds wherever in the download the cancel
+        // landed: the library is derived from ITEM rows, not download rows, so an
+        // item row left behind lists a cancelled item as playable and nothing
+        // ever removes it. Asked of the phantom server rather than the store,
+        // because that is what a person would see.
+        const listed = await (await fetch('/Items?Recursive=true&IncludeItemTypes=Movie')).json();
+        const inLibrary = (listed.Items || []).some((i) => i.Id === big.Id);
+        const artwork = !!(await window.PS_OPFS.file(
+            window.PS_SCHEMA.paths.image(server.id, big.Id, 'Primary')));
+        return { stopped, outcome, before, after, inLibrary, artwork };
     }, phantomId);
     check('an in-flight download can be cancelled',
         cancelled.skipped || (cancelled.stopped === true && cancelled.outcome === 'cancelled'),
         cancelled.skipped ? 'no fixture' : `${cancelled.outcome}`);
+    check('a cancelled item is not left in the library',
+        cancelled.skipped || (cancelled.inLibrary === false && cancelled.artwork === false),
+        cancelled.skipped ? 'nothing to cancel'
+            : `listed ${cancelled.inLibrary}, artwork ${cancelled.artwork}`);
     check('a cancelled download leaves no half-written row',
         cancelled.skipped || cancelled.after === cancelled.before,
         `${cancelled.before} rows before, ${cancelled.after} after`);
