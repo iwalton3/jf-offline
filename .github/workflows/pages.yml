@@ -48,7 +48,9 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          # jellyfin-web's engines field requires this; release-12.z asks for
+          # node >=24 and npm >=11, and npm ci refuses outright below it.
+          node-version: 24
           cache: npm
           cache-dependency-path: jellyfin-web/package-lock.json
 
@@ -80,6 +82,9 @@ jobs:
             --out _site \
             --base-path "$BASE_PATH"
 
+      - name: Check the assembly has what it needs
+        run: python3 overlay-repo/tools/check-assembly.py _site "$BASE_PATH"
+
       - name: Verify the assembled site in a browser
         run: |
           # Served the way Pages will serve it: a plain static host with the site
@@ -93,35 +98,11 @@ jobs:
             curl -fsS "http://127.0.0.1:8094${BASE_PATH}/web/" >/dev/null && break
             sleep 1
           done
-          npm install --no-save puppeteer@23
+          # Installed inside the checkout so `require('puppeteer')` resolves from
+          # the script's own directory rather than from wherever npm happened to
+          # put a node_modules.
+          (cd overlay-repo && npm init -y >/dev/null && npm install --no-save puppeteer@23)
           node overlay-repo/tools/verify-site.js "http://127.0.0.1:8094${BASE_PATH}"
-
-      - name: Check the assembly has what it needs
-        run: |
-          set -e
-          test -f "_site/System/Info/Public"
-          test -f "_site/web/serviceworker.js"
-          test -f "_site/web/precache-manifest.json"
-          # The bootstrap must be in the document: without it the page has no
-          # WebSocket stand-in and no storage bridge.
-          grep -q "${BASE_PATH}/web/ps-bootstrap.js" _site/web/index.html
-          grep -q "${BASE_PATH}/web/ps-ui.js" _site/web/index.html
-          # The worker must be ours, not jellyfin-web's.
-          grep -q "phantom" _site/web/serviceworker.js
-          # Every manifest entry must exist on disk, or the precache stalls.
-          python3 - <<'PY'
-          import json, os, sys
-          base = os.environ["BASE_PATH"]
-          manifest = json.load(open("_site/web/precache-manifest.json"))
-          missing = [
-              f for f in manifest["files"]
-              if not os.path.isfile(os.path.join("_site", f[len(base) + 1:]))
-          ]
-          if missing:
-              print("missing from the assembled site:", missing[:10], file=sys.stderr)
-              sys.exit(1)
-          print(f"manifest {manifest['version']}: {len(manifest['files'])} files, all present")
-          PY
 
       - name: Package the bundle for self-hosting
         run: |
