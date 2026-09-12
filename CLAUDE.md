@@ -175,8 +175,13 @@ HEADFUL=1 ... node tools/smoke.js   # to watch it
   written as if mounted at the root. Module specifiers are relative for the same
   reason — an absolute `/web/...` only resolves at an origin root.
 - **`navigator.storage.estimate().usage` lags badly**, measured at 0.5 GB against
-  4.4 GB actually written. The settings page sums the download rows instead,
-  which is the number the list adds up to.
+  4.4 GB actually written, so the settings page does not use it for the figure it
+  shows. It walks the store instead — `storageUsed()` — because the rule it
+  replaces, *"sums the download rows, which is the number the list adds up to"*,
+  was a promise the code had stopped keeping: `bytesDone` is the media transfer,
+  and subtitles, font attachments, trickplay tiles and artwork are all written
+  after it without touching it. That was 24% of the store on the smoke fixture,
+  invisible to the page and to every row in the list.
 
 - **A worker update applies on the load AFTER the one that finds it.** Changing a
   file the worker imports is detected — Chrome re-fetches imported scripts and
